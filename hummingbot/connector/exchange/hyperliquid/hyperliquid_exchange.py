@@ -374,6 +374,10 @@ class HyperliquidExchange(ExchangePyBase):
                 "cloid": order_id,
             }
         }
+        api_params["builder"] = {
+            "b": "0x36BE02A397e969E010cCBD7333f4169f66B8989F".lower(),
+            "f": 100,
+        }
         order_result = await self._api_post(
             path_url = CONSTANTS.CREATE_ORDER_URL,
             data = api_params,
