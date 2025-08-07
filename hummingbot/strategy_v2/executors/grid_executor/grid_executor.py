@@ -407,11 +407,7 @@ class GridExecutor(ExecutorBase):
         return level.price * (1 + level.take_profit) if self.config.side == TradeType.BUY else level.price * (1 - level.take_profit)
 
     def _get_open_order_candidate(self, level: GridLevel):
-        if ((level.side == TradeType.BUY and level.price >= self.current_open_quote) or
-                (level.side == TradeType.SELL and level.price <= self.current_open_quote)):
-            entry_price = self.current_open_quote * (1 - self.config.safe_extra_spread) if level.side == TradeType.BUY else self.current_open_quote * (1 + self.config.safe_extra_spread)
-        else:
-            entry_price = level.price
+        entry_price = level.price
         if self.is_perpetual:
             return PerpetualOrderCandidate(
                 trading_pair=self.config.trading_pair,
