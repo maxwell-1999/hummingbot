@@ -1,0 +1,32 @@
+id: dca_poc_01
+controller_name: dca_controller
+controller_type: generic
+candles_config: []
+manual_kill_switch: false
+
+# Market and account
+connector_name: hyperliquid_perpetual
+trading_pair: BTC-USD
+position_mode: "ONEWAY"
+leverage: 40
+side: 1  # BUY
+
+# DCA settings (three tranches of ~$50 each)
+amounts_quote:
+  - "50"
+  - "50"
+  - "50"
+prices:
+  # around current mid ~118926 with slight spacing
+  - "118800"
+
+# Execution mode: TAKer for immediate execution POC
+mode: "MAKER"
+
+# Optional risk params (unset)
+take_profit: null
+stop_loss: null
+activation_bounds: null
+
+# Initial positions override (none)
+initial_positions: [] 
