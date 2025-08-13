@@ -36,13 +36,14 @@ class DCAControllerConfig(ControllerConfigBase):
     trading_pair: str
     side: TradeType = TradeType.BUY
     position_mode: PositionMode = PositionMode.HEDGE
-    leverage: int = 1
+    leverage: Decimal
 
     # DCA parameters
-    amounts_quote: List[Decimal] = Field(default_factory=list)
-    prices: List[Decimal] = Field(default_factory=list)
+    levels: Decimal = Field(..., description="Number of levels for trading")
+    price_deviation: Decimal = Field(..., description="Price deviation for trading")
     take_profit: Optional[Decimal] = None
     stop_loss: Optional[Decimal] = None
+    start_price: Optional[Decimal] = None
     time_limit: Optional[int] = None
     mode: DCAMode = DCAMode.MAKER
     activation_bounds: Optional[List[Decimal]] = None
@@ -63,53 +64,57 @@ class DCAController(ControllerBase):
     def determine_executor_actions(self) -> List[ExecutorAction]:
         # Emit a single DCA executor when none is active
         # Create price array
-        if len(self.active_executors()) == 0 and len(self.config.amounts_quote) > 0:
+        if len(self.active_executors()) == 0:
             # Build prices dynamically if not provided or mismatched in length
-            levels = len(self.config.amounts_quote)
+            levels = int(self.config.levels)
             prices_to_use: List[Decimal]
-            if len(self.config.prices) == levels and levels > 0:
-                prices_to_use = self.config.prices
-            else:
-                mid_price = self.market_data_provider.get_price_by_type(
-                    self.config.connector_name,
-                    self.config.trading_pair,
-                    PriceType.MidPrice,
+            amounts_quote: List[Decimal]
+            if levels > 0:
+                mid_price = (
+                    self.config.start_price
+                    or self.market_data_provider.get_price_by_type(
+                        self.config.connector_name,
+                        self.config.trading_pair,
+                        PriceType.MidPrice,
+                    )
                 )
-                print("mid_price", mid_price)
-                step = Decimal("0.002")  # 2% step per level
+                self.logger().info(f"mid_price: {mid_price}")
+                step_in_perc = self.config.price_deviation
+                amounts_quote = [
+                    self.config.total_amount_quote / levels for i in range(levels)
+                ]
+                self.logger().info(f"amounts_quote: {amounts_quote}")
                 if self.config.side == TradeType.BUY:
-                    mid_price = mid_price - 100
                     prices_to_use = [
-                        mid_price * (Decimal("1") - step * Decimal(i + 1))
+                        mid_price * (Decimal("1") - step_in_perc * Decimal(i))
                         for i in range(levels)
                     ]
                 else:
-                    mid_price = mid_price + 100
                     prices_to_use = [
-                        mid_price * (Decimal("1") + step * Decimal(i + 1))
+                        mid_price * (Decimal("1") + step_in_perc * Decimal(i))
                         for i in range(levels)
                     ]
-            print("prices_to_use", prices_to_use)
-            dca_config = DCAExecutorConfig(
-                timestamp=self.market_data_provider.time(),
-                connector_name=self.config.connector_name,
-                trading_pair=self.config.trading_pair,
-                side=self.config.side,
-                leverage=self.config.leverage,
-                amounts_quote=self.config.amounts_quote,
-                prices=prices_to_use,
-                take_profit=self.config.take_profit,
-                stop_loss=self.config.stop_loss,
-                time_limit=self.config.time_limit,
-                mode=self.config.mode,
-                activation_bounds=self.config.activation_bounds,
-                level_id=None,
-            )
-            return [
-                CreateExecutorAction(
-                    controller_id=self.config.id, executor_config=dca_config
+                self.logger().info(f"prices_to_use: {prices_to_use}")
+                dca_config = DCAExecutorConfig(
+                    timestamp=self.market_data_provider.time(),
+                    connector_name=self.config.connector_name,
+                    trading_pair=self.config.trading_pair,
+                    side=self.config.side,
+                    leverage=int(self.config.leverage),
+                    amounts_quote=amounts_quote,
+                    prices=prices_to_use,
+                    take_profit=self.config.take_profit,
+                    stop_loss=self.config.stop_loss,
+                    time_limit=self.config.time_limit,
+                    mode=self.config.mode,
+                    activation_bounds=self.config.activation_bounds,
+                    level_id=None,
                 )
-            ]
+                return [
+                    CreateExecutorAction(
+                        controller_id=self.config.id, executor_config=dca_config
+                    )
+                ]
         return []
 
     async def update_processed_data(self):
