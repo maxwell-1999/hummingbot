@@ -17,11 +17,13 @@ class GridExecutorConfig(ExecutorConfigBase):
     trading_pair: str
     start_price: Decimal
     end_price: Decimal
-    limit_price: Decimal
     side: TradeType = TradeType.BUY
     # Profiling
     total_amount_quote: Decimal
-    min_spread_between_orders: Decimal = Decimal("0.0005")
+    n_levels: int = 10  # Number of grid levels to create
+    min_spread_between_orders: Optional[Decimal] = Decimal(
+        "0.0005"
+    )  # Optional fallback
     min_order_amount_quote: Decimal = Decimal("5")
     # Execution
     max_open_orders: int = 5
@@ -35,7 +37,10 @@ class GridExecutorConfig(ExecutorConfigBase):
     level_id: Optional[str] = None
     deduct_base_fees: bool = False
     keep_position: bool = False
-    coerce_tp_to_step: bool = False
+    coerce_tp_to_step: bool = True
+    disable_first_level_tp: bool = (
+        False  # Disable TP on first level for true grid behavior
+    )
 
 
 class GridLevelStates(Enum):
