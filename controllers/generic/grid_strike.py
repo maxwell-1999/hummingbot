@@ -17,6 +17,7 @@ class GridStrikeConfig(ControllerConfigBase):
     """
     Configuration required to run the GridStrike strategy for one connector and trading pair.
     """
+
     controller_type: str = "generic"
     controller_name: str = "grid_strike"
     candles_config: List[CandlesConfig] = []
@@ -29,20 +30,38 @@ class GridStrikeConfig(ControllerConfigBase):
     connector_name: str = "binance_perpetual"
     trading_pair: str = "WLD-USDT"
     side: TradeType = TradeType.BUY
-    start_price: Decimal = Field(default=Decimal("0.58"), json_schema_extra={"is_updatable": True})
-    end_price: Decimal = Field(default=Decimal("0.95"), json_schema_extra={"is_updatable": True})
-    limit_price: Decimal = Field(default=Decimal("0.55"), json_schema_extra={"is_updatable": True})
+
+    # Grid price boundaries
+    start_price: Decimal = Field(
+        default=Decimal("95000"), json_schema_extra={"is_updatable": True}
+    )
+    end_price: Decimal = Field(
+        default=Decimal("105000"), json_schema_extra={"is_updatable": True}
+    )
 
     # Profiling
-    total_amount_quote: Decimal = Field(default=Decimal("1000"), json_schema_extra={"is_updatable": True})
-    min_spread_between_orders: Optional[Decimal] = Field(default=Decimal("0.001"), json_schema_extra={"is_updatable": True})
-    min_order_amount_quote: Optional[Decimal] = Field(default=Decimal("5"), json_schema_extra={"is_updatable": True})
-
+    total_amount_quote: Decimal = Field(
+        default=Decimal("1000"), json_schema_extra={"is_updatable": True}
+    )
+    levels: int = Field(default=3, json_schema_extra={"is_updatable": True})
+    min_order_amount_quote: Decimal = Field(
+        default=Decimal("5"), json_schema_extra={"is_updatable": True}
+    )
+    last_price: Decimal = Field(
+        default=Decimal("118000"), json_schema_extra={"is_updatable": True}
+    )
     # Execution
     max_open_orders: int = Field(default=2, json_schema_extra={"is_updatable": True})
-    max_orders_per_batch: Optional[int] = Field(default=1, json_schema_extra={"is_updatable": True})
+    max_orders_per_batch: Optional[int] = Field(
+        default=1, json_schema_extra={"is_updatable": True}
+    )
+    disable_first_level_tp: bool = Field(
+        default=False, json_schema_extra={"is_updatable": True}
+    )
     order_frequency: int = Field(default=3, json_schema_extra={"is_updatable": True})
-    activation_bounds: Optional[Decimal] = Field(default=None, json_schema_extra={"is_updatable": True})
+    activation_bounds: Optional[Decimal] = Field(
+        default=None, json_schema_extra={"is_updatable": True}
+    )
     keep_position: bool = Field(default=False, json_schema_extra={"is_updatable": True})
 
     # Risk Management
@@ -66,44 +85,60 @@ class GridStrike(ControllerBase):
         self.initialize_rate_sources()
 
     def initialize_rate_sources(self):
-        self.market_data_provider.initialize_rate_sources([ConnectorPair(connector_name=self.config.connector_name,
-                                                                         trading_pair=self.config.trading_pair)])
+        self.market_data_provider.initialize_rate_sources(
+            [
+                ConnectorPair(
+                    connector_name=self.config.connector_name,
+                    trading_pair=self.config.trading_pair,
+                )
+            ]
+        )
 
     def active_executors(self) -> List[ExecutorInfo]:
-        return [
-            executor for executor in self.executors_info
-            if executor.is_active
-        ]
+        return [executor for executor in self.executors_info if executor.is_active]
 
     def is_inside_bounds(self, price: Decimal) -> bool:
         return self.config.start_price <= price <= self.config.end_price
 
     def determine_executor_actions(self) -> List[ExecutorAction]:
         mid_price = self.market_data_provider.get_price_by_type(
-            self.config.connector_name, self.config.trading_pair, PriceType.MidPrice)
-        if len(self.active_executors()) == 0 and self.is_inside_bounds(mid_price):
-            return [CreateExecutorAction(
-                controller_id=self.config.id,
-                executor_config=GridExecutorConfig(
-                    timestamp=self.market_data_provider.time(),
-                    connector_name=self.config.connector_name,
-                    trading_pair=self.config.trading_pair,
-                    start_price=self.config.start_price,
-                    end_price=self.config.end_price,
-                    leverage=self.config.leverage,
-                    limit_price=self.config.limit_price,
-                    side=self.config.side,
-                    total_amount_quote=self.config.total_amount_quote,
-                    min_spread_between_orders=self.config.min_spread_between_orders,
-                    min_order_amount_quote=self.config.min_order_amount_quote,
-                    max_open_orders=self.config.max_open_orders,
-                    max_orders_per_batch=self.config.max_orders_per_batch,
-                    order_frequency=self.config.order_frequency,
-                    activation_bounds=self.config.activation_bounds,
-                    triple_barrier_config=self.config.triple_barrier_config,
-                    level_id=None,
-                    keep_position=self.config.keep_position,
-                ))]
+            self.config.connector_name, self.config.trading_pair, PriceType.MidPrice
+        )
+
+        # Use configured price boundaries directly
+        start_price = self.config.start_price
+        end_price = self.config.end_price
+
+        if len(self.active_executors()) == 0:
+            self.logger().info(
+                f"GridStrike: Creating dynamic grid with {self.config.levels} levels "
+                f"from {start_price} to {end_price} (current: {mid_price})"
+            )
+            return [
+                CreateExecutorAction(
+                    controller_id=self.config.id,
+                    executor_config=GridExecutorConfig(
+                        timestamp=self.market_data_provider.time(),
+                        connector_name=self.config.connector_name,
+                        trading_pair=self.config.trading_pair,
+                        start_price=start_price,
+                        end_price=end_price,
+                        leverage=self.config.leverage,
+                        side=self.config.side,  # This will be overridden by dynamic logic
+                        total_amount_quote=self.config.total_amount_quote,
+                        n_levels=self.config.levels,  # Use n_levels instead of min_spread
+                        min_order_amount_quote=self.config.min_order_amount_quote,
+                        max_open_orders=self.config.max_open_orders,
+                        max_orders_per_batch=self.config.max_orders_per_batch,
+                        order_frequency=self.config.order_frequency,
+                        activation_bounds=self.config.activation_bounds,
+                        triple_barrier_config=self.config.triple_barrier_config,
+                        level_id=None,
+                        disable_first_level_tp=self.config.disable_first_level_tp,
+                        keep_position=self.config.keep_position,
+                    ),
+                )
+            ]
         return []
 
     async def update_processed_data(self):
@@ -112,36 +147,51 @@ class GridStrike(ControllerBase):
     def to_format_status(self) -> List[str]:
         status = []
         mid_price = self.market_data_provider.get_price_by_type(
-            self.config.connector_name, self.config.trading_pair, PriceType.MidPrice)
+            self.config.connector_name, self.config.trading_pair, PriceType.MidPrice
+        )
         # Define standard box width for consistency
         box_width = 114
         # Top Grid Configuration box with simple borders
         status.append("┌" + "─" * box_width + "┐")
         # First line: Grid Configuration and Mid Price
         left_section = "Grid Configuration:"
-        padding = box_width - len(left_section) - 4  # -4 for the border characters and spacing
+        padding = (
+            box_width - len(left_section) - 4
+        )  # -4 for the border characters and spacing
         config_line1 = f"│ {left_section}{' ' * padding}"
-        padding2 = box_width - len(config_line1) + 1  # +1 for correct right border alignment
+        padding2 = (
+            box_width - len(config_line1) + 1
+        )  # +1 for correct right border alignment
         config_line1 += " " * padding2 + "│"
         status.append(config_line1)
         # Second line: Configuration parameters
-        config_line2 = f"│ Start: {self.config.start_price:.4f} │ End: {self.config.end_price:.4f} │ Side: {self.config.side} │ Limit: {self.config.limit_price:.4f} │ Mid Price: {mid_price:.4f} │"
-        padding = box_width - len(config_line2) + 1  # +1 for correct right border alignment
+        config_line2 = ""
+        padding = (
+            box_width - len(config_line2) + 1
+        )  # +1 for correct right border alignment
         config_line2 += " " * padding + "│"
         status.append(config_line2)
         # Third line: Max orders and Inside bounds
         config_line3 = f"│ Max Orders: {self.config.max_open_orders}   │ Inside bounds: {1 if self.is_inside_bounds(mid_price) else 0}"
-        padding = box_width - len(config_line3) + 1  # +1 for correct right border alignment
+        padding = (
+            box_width - len(config_line3) + 1
+        )  # +1 for correct right border alignment
         config_line3 += " " * padding + "│"
         status.append(config_line3)
         status.append("└" + "─" * box_width + "┘")
         for level in self.active_executors():
             # Define column widths for perfect alignment
-            col_width = box_width // 3  # Dividing the total width by 3 for equal columns
+            col_width = (
+                box_width // 3
+            )  # Dividing the total width by 3 for equal columns
             total_width = box_width
             # Grid Status header - use long line and running status
             status_header = f"Grid Status: {level.id} (RunnableStatus.RUNNING)"
-            status_line = f"┌ {status_header}" + "─" * (total_width - len(status_header) - 2) + "┐"
+            status_line = (
+                f"┌ {status_header}"
+                + "─" * (total_width - len(status_header) - 2)
+                + "┐"
+            )
             status.append(status_line)
             # Calculate exact column widths for perfect alignment
             col1_end = col_width
@@ -156,13 +206,13 @@ class GridStrike(ControllerBase):
                 f"OPEN_ORDER_PLACED: {len(level.custom_info['levels_by_state'].get('OPEN_ORDER_PLACED', []))}",
                 f"OPEN_ORDER_FILLED: {len(level.custom_info['levels_by_state'].get('OPEN_ORDER_FILLED', []))}",
                 f"CLOSE_ORDER_PLACED: {len(level.custom_info['levels_by_state'].get('CLOSE_ORDER_PLACED', []))}",
-                f"COMPLETE: {len(level.custom_info['levels_by_state'].get('COMPLETE', []))}"
+                f"COMPLETE: {len(level.custom_info['levels_by_state'].get('COMPLETE', []))}",
             ]
             order_stats_data = [
                 f"Total: {sum(len(level.custom_info[k]) for k in ['filled_orders', 'failed_orders', 'canceled_orders'])}",
                 f"Filled: {len(level.custom_info['filled_orders'])}",
                 f"Failed: {len(level.custom_info['failed_orders'])}",
-                f"Canceled: {len(level.custom_info['canceled_orders'])}"
+                f"Canceled: {len(level.custom_info['canceled_orders'])}",
             ]
             perf_metrics_data = [
                 f"Buy Vol: {level.custom_info['realized_buy_size_quote']:.4f}",
@@ -170,10 +220,12 @@ class GridStrike(ControllerBase):
                 f"R. PnL: {level.custom_info['realized_pnl_quote']:.4f}",
                 f"R. Fees: {level.custom_info['realized_fees_quote']:.4f}",
                 f"P. PnL: {level.custom_info['position_pnl_quote']:.4f}",
-                f"Position: {level.custom_info['position_size_quote']:.4f}"
+                f"Position: {level.custom_info['position_size_quote']:.4f}",
             ]
             # Build rows with perfect alignment
-            max_rows = max(len(level_dist_data), len(order_stats_data), len(perf_metrics_data))
+            max_rows = max(
+                len(level_dist_data), len(order_stats_data), len(perf_metrics_data)
+            )
             for i in range(max_rows):
                 col1 = level_dist_data[i] if i < len(level_dist_data) else ""
                 col2 = order_stats_data[i] if i < len(order_stats_data) else ""
@@ -189,7 +241,9 @@ class GridStrike(ControllerBase):
             # Liquidity line with perfect alignment
             status.append("├" + "─" * total_width + "┤")
             liquidity_line = f"│ Open Liquidity: {level.custom_info['open_liquidity_placed']:.4f} │ Close Liquidity: {level.custom_info['close_liquidity_placed']:.4f} │"
-            liquidity_line += " " * (total_width - len(liquidity_line) + 1)  # +1 for correct right border alignment
+            liquidity_line += " " * (
+                total_width - len(liquidity_line) + 1
+            )  # +1 for correct right border alignment
             liquidity_line += "│"
             status.append(liquidity_line)
             status.append("└" + "─" * total_width + "┘")
