@@ -12,8 +12,8 @@ from hummingbot.strategy_v2.executors.position_executor.data_types import (
 from hummingbot.strategy_v2.models.executors import TrackedOrder
 
 
-class GridExecutorConfig(ExecutorConfigBase):
-    type: Literal["grid_executor"] = "grid_executor"
+class NeutralGridExecutorConfig(ExecutorConfigBase):
+    type: Literal["neutral_grid_executor"] = "neutral_grid_executor"
     # Boundaries
     connector_name: str
     trading_pair: str
