@@ -94,9 +94,7 @@ class GridExecutor(ExecutorBase):
         self._filled_orders = []
         self._failed_orders = []
         self._canceled_orders = []
-        self.logger().info(
-            f"GridExecutor: Generating dynamic grid levels (TP disabled - using adjacent level logic)"
-        )
+
         self.step = Decimal("0")
         self.position_break_even_price = Decimal("0")
         self.position_size_base = Decimal("0")
@@ -174,7 +172,7 @@ class GridExecutor(ExecutorBase):
         # Add safety margin to minimum notional to account for price movements and quantization
         min_notional_with_margin = min_notional * Decimal(
             "1.05"
-        )  # 5% margin for safety
+        )  # 20% margin for safety
         # Calculate minimum base amount that satisfies both min_notional and quantization
         min_base_amount = max(
             min_notional_with_margin / price,  # Minimum from notional requirement
@@ -190,11 +188,10 @@ class GridExecutor(ExecutorBase):
         )
         # Verify the quantized amount meets minimum notional
         min_quote_amount = min_base_amount * price
+        # Calculate grid range and minimum step size
 
-        # Use n_levels directly from config
         n_levels = self.config.n_levels
-
-        # Calculate quote amount per level
+        # Calculate quote amount per level ensuring it meets minimum after quantization
         base_amount_per_level = max(
             min_base_amount,
             Decimal(
@@ -208,13 +205,11 @@ class GridExecutor(ExecutorBase):
             * min_base_increment,
         )
         quote_amount_per_level = base_amount_per_level * price
-
         # Adjust number of levels if total amount would be exceeded
-        max_possible_levels = int(
-            float(self.config.total_amount_quote) / float(quote_amount_per_level)
+        n_levels = min(
+            n_levels,
+            int(float(self.config.total_amount_quote) / float(quote_amount_per_level)),
         )
-        n_levels = min(n_levels, max_possible_levels)
-
         # Ensure we have at least one level
         n_levels = max(1, n_levels)
 
@@ -234,43 +229,26 @@ class GridExecutor(ExecutorBase):
             mid_price = (self.config.start_price + self.config.end_price) / 2
             prices = [mid_price]
             self.step = grid_range
-
+        take_profit = abs(self.step)
         # Create grid levels
         for i, price in enumerate(prices):
-            # For dynamic grid: disable TP since we use adjacent level logic
-            level_take_profit = Decimal("0")  # Always disable TP for dynamic grid
-
-            # Dynamic side determination based on current market price
-            # Levels above mid_price = SELL, levels below = BUY
-            current_mid_price = self.get_price(
-                self.config.connector_name, self.config.trading_pair, PriceType.MidPrice
-            )
-            dynamic_side = (
-                TradeType.SELL if price > current_mid_price else TradeType.BUY
-            )
-
             grid_levels.append(
                 GridLevel(
                     id=f"L{i}",
                     price=price,
                     amount_quote=quote_amount_per_level,
-                    take_profit=level_take_profit,  # Always 0 for dynamic grid
-                    side=dynamic_side,  # Use dynamic side instead of config.side
+                    take_profit=take_profit,
+                    side=self.config.side,
                     open_order_type=self.config.triple_barrier_config.open_order_type,
                     take_profit_order_type=self.config.triple_barrier_config.take_profit_order_type,
                 )
             )
         # Log grid creation details
         self.logger().info(
-            f"""GridExecutor: Dynamic Grid Created
-            ---------------
-            Total levels: {len(grid_levels)} (requested: {self.config.n_levels})
-            Price range: {self.config.start_price} - {self.config.end_price}
-            Current mid price: {current_mid_price}
-            Amount per level: {quote_amount_per_level}
-            Grid levels: {[f"{g.id}: {g.price} ({g.side.name})" for g in grid_levels]}
-            Note: Sides are dynamic - SELL above current price, BUY below current price
-            """
+            f"Created {len(grid_levels)} grid levels with "
+            f"{[round(level.price, 2) for level in grid_levels]}"
+            f"amount per level: {quote_amount_per_level:.4f} {self.config.trading_pair.split('-')[1]} "
+            f"(base amount: {(quote_amount_per_level / price):.8f} {self.config.trading_pair.split('-')[0]})"
         )
         return grid_levels
 
@@ -326,10 +304,6 @@ class GridExecutor(ExecutorBase):
         self.update_grid_levels()
         self.update_metrics()
         if self.status == RunnableStatus.RUNNING:
-            if self.control_triple_barrier():
-                self.cancel_open_orders()
-                self._status = RunnableStatus.SHUTTING_DOWN
-                return
             open_orders_to_create = self.get_open_orders_to_create()
             close_orders_to_create = self.get_close_orders_to_create()
             open_order_ids_to_cancel = self.get_open_order_ids_to_cancel()
@@ -459,6 +433,7 @@ class GridExecutor(ExecutorBase):
             )
             if in_flight_order:
                 self._close_order.order = in_flight_order
+                self.logger().info("Waiting for close order to be filled")
             else:
                 self._failed_orders.append(self._close_order.order_id)
                 self._close_order = None
@@ -472,7 +447,6 @@ class GridExecutor(ExecutorBase):
         :param level: The level to adjust and place the open order.
         :return: None
         """
-
         order_candidate = self._get_open_order_candidate(level)
         self.adjust_order_candidates(self.config.connector_name, [order_candidate])
         if order_candidate.amount > 0:
@@ -487,9 +461,18 @@ class GridExecutor(ExecutorBase):
             )
             level.active_open_order = TrackedOrder(order_id=order_id)
             self.max_open_creation_timestamp = self._strategy.current_timestamp
+            self.logger().debug(
+                f"Executor ID: {self.config.id} - Placing open order {order_id}"
+            )
 
     def adjust_and_place_close_order(self, level: GridLevel):
+        self.logger().info(
+            f"closedeb: level.price before {level.price}, {level.take_profit}, {level.amount_quote}"
+        )
         order_candidate = self._get_close_order_candidate(level)
+        self.logger().info(
+            f"closedeb: level.price after {order_candidate.price}, {order_candidate.amount}"
+        )
         self.adjust_order_candidates(self.config.connector_name, [order_candidate])
         if order_candidate.amount > 0:
             order_id = self.place_order(
@@ -514,22 +497,13 @@ class GridExecutor(ExecutorBase):
         )
 
     def _get_open_order_candidate(self, level: GridLevel):
-        if (level.side == TradeType.BUY and level.price >= self.current_open_quote) or (
-            level.side == TradeType.SELL and level.price <= self.current_open_quote
-        ):
-            entry_price = (
-                self.current_open_quote * (1 - self.config.safe_extra_spread)
-                if level.side == TradeType.BUY
-                else self.current_open_quote * (1 + self.config.safe_extra_spread)
-            )
-        else:
-            entry_price = level.price
+        entry_price = level.price
         if self.is_perpetual:
             return PerpetualOrderCandidate(
                 trading_pair=self.config.trading_pair,
                 is_maker=self.config.triple_barrier_config.open_order_type.is_limit_type(),
                 order_type=self.config.triple_barrier_config.open_order_type,
-                order_side=level.side,  # Use level's dynamic side
+                order_side=self.config.side,
                 amount=level.amount_quote / self.mid_price,
                 price=entry_price,
                 leverage=Decimal(self.config.leverage),
@@ -538,28 +512,13 @@ class GridExecutor(ExecutorBase):
             trading_pair=self.config.trading_pair,
             is_maker=self.config.triple_barrier_config.open_order_type.is_limit_type(),
             order_type=self.config.triple_barrier_config.open_order_type,
-            order_side=level.side,  # Use level's dynamic side
+            order_side=self.config.side,
             amount=level.amount_quote / self.mid_price,
             price=entry_price,
         )
 
     def _get_close_order_candidate(self, level: GridLevel):
         take_profit_price = self.get_take_profit_price(level)
-        # Determine close order side - opposite of the level's side
-        close_side = TradeType.SELL if level.side == TradeType.BUY else TradeType.BUY
-
-        if (
-            level.side == TradeType.BUY
-            and take_profit_price <= self.current_close_quote
-        ) or (
-            level.side == TradeType.SELL
-            and take_profit_price >= self.current_close_quote
-        ):
-            take_profit_price = (
-                self.current_close_quote * (1 + self.config.safe_extra_spread)
-                if level.side == TradeType.BUY
-                else self.current_close_quote * (1 - self.config.safe_extra_spread)
-            )
         if (
             level.active_open_order.fee_asset == self.config.trading_pair.split("-")[0]
             and self.config.deduct_base_fees
@@ -576,7 +535,7 @@ class GridExecutor(ExecutorBase):
                 trading_pair=self.config.trading_pair,
                 is_maker=self.config.triple_barrier_config.take_profit_order_type.is_limit_type(),
                 order_type=self.config.triple_barrier_config.take_profit_order_type,
-                order_side=close_side,  # Use opposite side for closing
+                order_side=self.close_order_side,
                 amount=amount,
                 price=take_profit_price,
                 leverage=Decimal(self.config.leverage),
@@ -585,7 +544,7 @@ class GridExecutor(ExecutorBase):
             trading_pair=self.config.trading_pair,
             is_maker=self.config.triple_barrier_config.take_profit_order_type.is_limit_type(),
             order_type=self.config.triple_barrier_config.take_profit_order_type,
-            order_side=close_side,  # Use opposite side for closing
+            order_side=self.close_order_side,
             amount=amount,
             price=take_profit_price,
         )
@@ -604,10 +563,6 @@ class GridExecutor(ExecutorBase):
             self.config.trading_pair,
             price_type=self.close_order_price_type,
         )
-
-        # Update grid sides based on current price for dynamic behavior
-        self._update_grid_sides_based_on_price()
-
         self.update_position_metrics()
         self.update_realized_pnl_metrics()
 
@@ -616,7 +571,6 @@ class GridExecutor(ExecutorBase):
         This method is responsible for controlling the open orders. Will check for each grid level if the order if there
         is an open order. If not, it will place a new orders from the proposed grid levels based on the current price,
         max open orders, max orders per batch, activation bounds and order frequency.
-        For dynamic grid: only create orders that make sense based on current price vs level price.
         """
         n_open_orders = len(
             [
@@ -630,35 +584,30 @@ class GridExecutor(ExecutorBase):
             or n_open_orders >= self.config.max_open_orders
         ):
             return []
-
-        # Filter levels by activation bounds and dynamic logic
         levels_allowed = self._filter_levels_by_activation_bounds()
-
-        # Additional filtering for dynamic grid logic
-        dynamic_levels_allowed = []
-        current_price = self.mid_price
-
-        for level in levels_allowed:
-            # Only allow levels where the side makes sense relative to current price
-            if (level.side == TradeType.SELL and level.price > current_price) or (
-                level.side == TradeType.BUY and level.price <= current_price
-            ):
-                dynamic_levels_allowed.append(level)
-
-        sorted_levels_by_proximity = self._sort_levels_by_proximity(
-            dynamic_levels_allowed
-        )
+        sorted_levels_by_proximity = self._sort_levels_by_proximity(levels_allowed)
         return sorted_levels_by_proximity[: self.config.max_orders_per_batch]
 
     def get_close_orders_to_create(self):
         """
-        This method is responsible for controlling the take profit.
-        For dynamic grid: TP is disabled - we use adjacent level logic instead.
+        This method is responsible for controlling the take profit. It will check if the net pnl percentage is greater
+        than the take profit percentage and place the close order.
 
-        :return: Empty list - no automatic TP orders in dynamic grid
+        :return: None
         """
-        # Dynamic grid doesn't use automatic TP - we place orders on adjacent levels instead
-        return []
+        close_orders_proposal = []
+        open_orders_filled = self.levels_by_state[GridLevelStates.OPEN_ORDER_FILLED]
+        for level in open_orders_filled:
+            if self.config.activation_bounds:
+                tp_to_mid = (
+                    abs(self.get_take_profit_price(level) - self.mid_price)
+                    / self.mid_price
+                )
+                if tp_to_mid < self.config.activation_bounds:
+                    close_orders_proposal.append(level)
+            else:
+                close_orders_proposal.append(level)
+        return close_orders_proposal
 
     def get_open_order_ids_to_cancel(self):
         if self.config.activation_bounds:
@@ -704,103 +653,28 @@ class GridExecutor(ExecutorBase):
     def _filter_levels_by_activation_bounds(self):
         not_active_levels = self.levels_by_state[GridLevelStates.NOT_ACTIVE]
         if self.config.activation_bounds:
-            # For dynamic grid, filter based on each level's individual side
-            filtered_levels = []
-            for level in not_active_levels:
-                if level.side == TradeType.BUY:
-                    activation_bounds_price = self.mid_price * (
-                        1 - self.config.activation_bounds
-                    )
-                    if level.price >= activation_bounds_price:
-                        filtered_levels.append(level)
-                else:  # level.side == TradeType.SELL
-                    activation_bounds_price = self.mid_price * (
-                        1 + self.config.activation_bounds
-                    )
-                    if level.price <= activation_bounds_price:
-                        filtered_levels.append(level)
-            return filtered_levels
+            if self.config.side == TradeType.BUY:
+                activation_bounds_price = self.mid_price * (
+                    1 - self.config.activation_bounds
+                )
+                return [
+                    level
+                    for level in not_active_levels
+                    if level.price >= activation_bounds_price
+                ]
+            else:
+                activation_bounds_price = self.mid_price * (
+                    1 + self.config.activation_bounds
+                )
+                return [
+                    level
+                    for level in not_active_levels
+                    if level.price <= activation_bounds_price
+                ]
         return not_active_levels
 
     def _sort_levels_by_proximity(self, levels: List[GridLevel]):
         return sorted(levels, key=lambda level: abs(level.price - self.mid_price))
-
-    def control_triple_barrier(self):
-        """
-        This method is responsible for controlling the barriers. It controls the stop loss, take profit, time limit and
-        trailing stop.
-
-        :return: None
-        """
-        sl = self.stop_loss_condition()
-        # tp = self.take_profit_condition()
-        ts = self.trailing_stop_condition()
-
-        if sl:
-            self.close_type = CloseType.STOP_LOSS
-            return True
-        elif self.is_expired:
-            self.close_type = CloseType.TIME_LIMIT
-            return True
-        elif ts:
-            self.close_type = CloseType.TRAILING_STOP
-            return True
-        # elif tp:
-        #     self.close_type = CloseType.TAKE_PROFIT
-        #     return True
-
-        return False
-
-    def take_profit_condition(self):
-        """
-        Take profit will be when the mid price is above the end price of the grid and there are no active executors.
-        """
-        if (
-            self.mid_price > self.config.end_price
-            if self.config.side == TradeType.BUY
-            else self.mid_price < self.config.start_price
-        ):
-            return True
-        return False
-
-    def stop_loss_condition(self):
-        """
-        This method is responsible for controlling the stop loss. If the net pnl percentage is less than the stop loss
-        percentage, it places the close order and cancels the open orders.
-
-        :return: None
-        """
-
-        if self.config.triple_barrier_config.stop_loss:
-            return self.position_pnl_pct <= -self.config.triple_barrier_config.stop_loss
-
-        return False
-
-    def trailing_stop_condition(self):
-        if self.config.triple_barrier_config.trailing_stop:
-            net_pnl_pct = self.position_pnl_pct
-            if not self._trailing_stop_trigger_pct:
-                if (
-                    net_pnl_pct
-                    > self.config.triple_barrier_config.trailing_stop.activation_price
-                ):
-                    self._trailing_stop_trigger_pct = (
-                        net_pnl_pct
-                        - self.config.triple_barrier_config.trailing_stop.trailing_delta
-                    )
-            else:
-                if net_pnl_pct < self._trailing_stop_trigger_pct:
-                    return True
-                if (
-                    net_pnl_pct
-                    - self.config.triple_barrier_config.trailing_stop.trailing_delta
-                    > self._trailing_stop_trigger_pct
-                ):
-                    self._trailing_stop_trigger_pct = (
-                        net_pnl_pct
-                        - self.config.triple_barrier_config.trailing_stop.trailing_delta
-                    )
-        return False
 
     def place_close_order_and_cancel_open_orders(
         self, close_type: CloseType, price: Decimal = Decimal("NaN")
@@ -899,14 +773,6 @@ class GridExecutor(ExecutorBase):
         """
         await super().on_start()
         self.update_metrics()
-        tp = self.control_triple_barrier()
-
-        if tp:
-            self.logger().error(
-                f"Grid is already expired by {self.close_type} {self.config.triple_barrier_config.stop_loss}."
-            )
-
-            self._status = RunnableStatus.SHUTTING_DOWN
 
     def evaluate_max_retries(self):
         """
@@ -966,201 +832,15 @@ class GridExecutor(ExecutorBase):
     ):
         """
         This method is responsible for processing the order completed event. Here we will check if the id is one of the
-        tracked orders and update the state, and implement dynamic grid logic.
+        tracked orders and update the state
         """
         self.update_tracked_orders_with_order_id(event.order_id)
-
-        # Dynamic grid logic: when an order fills, place opposite orders on adjacent levels
-        self._handle_dynamic_grid_fill(event.order_id)
-
-    def _handle_dynamic_grid_fill(self, filled_order_id: str):
-        """
-        Handle dynamic grid logic when an order is filled.
-        Check i+1 and i-1 levels and place opposite orders if they're empty.
-        """
-        self.logger().debug(
-            f"AutoFillDeb: Handling dynamic grid fill for order: {filled_order_id}"
-        )
-
-        # Find which level was filled
-        filled_level_index = None
-        filled_level = None
-
-        for i, level in enumerate(self.grid_levels):
-            if (
-                level.active_open_order
-                and level.active_open_order.order_id == filled_order_id
-            ):
-                self.logger().debug(
-                    f"AutoFillDeb: Found order {filled_order_id} at level {i} ({level.id}), "
-                    f"is_filled: {level.active_open_order.is_filled}, "
-                    f"state: {level.state}"
-                )
-                # Check if order is filled (either fully or partially for our purposes)
-                if (
-                    level.active_open_order.is_filled
-                    or level.state == GridLevelStates.OPEN_ORDER_FILLED
-                ):
-                    filled_level_index = i
-                    filled_level = level
-                    break
-
-        if filled_level_index is None or filled_level is None:
-            self.logger().debug(
-                f"AutoFillDeb: Order {filled_order_id} not found in any grid level or not filled"
-            )
-            return
-
-        self.logger().info(
-            f"AutoFillDeb: Order filled at level {filled_level_index} ({filled_level.id}), "
-            f"checking adjacent levels for placement"
-        )
-
-        # Check adjacent levels and place opposite orders
-        self._place_adjacent_orders(filled_level_index, filled_level)
-
-    def _place_adjacent_orders(self, filled_index: int, filled_level: GridLevel):
-        """
-        Place opposite orders on adjacent levels based on dynamic grid logic.
-        Handles all states: NOT_ACTIVE, OPEN_ORDER_FILLED (needs remake), etc.
-        """
-        current_price = self.mid_price
-        self.logger().debug(
-            f"AutoFillDeb: Checking adjacent levels for filled_index: {filled_index}, current_price: {current_price}"
-        )
-
-        # Check level above (i+1) for SELL order
-        if filled_index + 1 < len(self.grid_levels):
-            upper_level = self.grid_levels[filled_index + 1]
-            self.logger().debug(
-                f"AutoFillDeb: Upper level {filled_index + 1} ({upper_level.id}): "
-                f"price={upper_level.price}, state={upper_level.state}, "
-                f"side={upper_level.side}, has_order={upper_level.active_open_order is not None}"
-            )
-
-            # Case 1: Level is completely vacant (NOT_ACTIVE)
-            if (
-                upper_level.price > current_price
-                and upper_level.state == GridLevelStates.NOT_ACTIVE
-            ):
-                upper_level.side = TradeType.SELL
-                self.logger().info(
-                    f"AutoFillDeb: Placing SELL order on vacant upper level {upper_level.id}"
-                )
-                self._place_dynamic_order(upper_level)
-
-            # Case 2: Level has filled open order (OPEN_ORDER_FILLED) - reset and remake
-            elif (
-                upper_level.state == GridLevelStates.OPEN_ORDER_FILLED
-                and upper_level.price > current_price
-            ):
-                # For dynamic grid: reset filled levels since we don't use TP
-                self.logger().info(
-                    f"AutoFillDeb: Resetting filled upper level {upper_level.id} to place new SELL order"
-                )
-                upper_level.reset_level()  # Reset to NOT_ACTIVE
-                upper_level.side = TradeType.SELL
-                self._place_dynamic_order(upper_level)
-            else:
-                self.logger().debug(
-                    f"AutoFillDeb: Upper level {upper_level.id} not eligible: "
-                    f"price_check={upper_level.price > current_price}, "
-                    f"state_check={upper_level.state == GridLevelStates.OPEN_ORDER_FILLED}"
-                )
-
-        # Check level below (i-1) for BUY order
-        if filled_index - 1 >= 0:
-            lower_level = self.grid_levels[filled_index - 1]
-            self.logger().debug(
-                f"AutoFillDeb: Lower level {filled_index - 1} ({lower_level.id}): "
-                f"price={lower_level.price}, state={lower_level.state}, "
-                f"side={lower_level.side}, has_order={lower_level.active_open_order is not None}"
-            )
-
-            # Case 1: Level is completely vacant (NOT_ACTIVE)
-            if (
-                lower_level.price <= current_price
-                and lower_level.state == GridLevelStates.NOT_ACTIVE
-            ):
-                lower_level.side = TradeType.BUY
-                self.logger().info(
-                    f"AutoFillDeb: Placing BUY order on vacant lower level {lower_level.id}"
-                )
-                self._place_dynamic_order(lower_level)
-
-            # Case 2: Level has filled open order (OPEN_ORDER_FILLED) - reset and remake
-            elif (
-                lower_level.state == GridLevelStates.OPEN_ORDER_FILLED
-                and lower_level.price <= current_price
-            ):
-                # For dynamic grid: reset filled levels since we don't use TP
-                self.logger().info(
-                    f"AutoFillDeb: Resetting filled lower level {lower_level.id} to place new BUY order"
-                )
-                lower_level.reset_level()  # Reset to NOT_ACTIVE
-                lower_level.side = TradeType.BUY
-                self._place_dynamic_order(lower_level)
-            else:
-                self.logger().debug(
-                    f"AutoFillDeb: Lower level {lower_level.id} not eligible: "
-                    f"price_check={lower_level.price <= current_price}, "
-                    f"state_check={lower_level.state == GridLevelStates.OPEN_ORDER_FILLED}"
-                )
-
-    def _place_dynamic_order(self, level: GridLevel):
-        """
-        Place an order on the specified level with dynamic side determination.
-        """
-        try:
-            order_candidate = self._get_open_order_candidate(level)
-            self.adjust_order_candidates(self.config.connector_name, [order_candidate])
-
-            if order_candidate.amount > 0:
-                order_id = self.place_order(
-                    connector_name=self.config.connector_name,
-                    trading_pair=self.config.trading_pair,
-                    order_type=self.config.triple_barrier_config.open_order_type,
-                    amount=order_candidate.amount,
-                    price=order_candidate.price,
-                    side=level.side,  # Use level's dynamic side
-                    position_action=PositionAction.OPEN,
-                )
-                level.active_open_order = TrackedOrder(order_id=order_id)
-                self.max_open_creation_timestamp = self._strategy.current_timestamp
-                self.logger().info(
-                    f"AutoFillDeb: Placed dynamic {level.side.name} order {order_id} at level {level.id} "
-                    f"(price: {order_candidate.price}, amount: {order_candidate.amount})"
-                )
-            else:
-                self.logger().warning(
-                    f"AutoFillDeb: Cannot place order on level {level.id} - amount is 0"
-                )
-        except Exception as e:
-            self.logger().error(
-                f"AutoFillDeb: Failed to place dynamic order on level {level.id}: {e}"
-            )
-
-    def _update_grid_sides_based_on_price(self):
-        """
-        Update all grid level sides based on current market price.
-        Levels above current price = SELL, levels below = BUY
-        """
-        current_price = self.mid_price
-
-        for level in self.grid_levels:
-            # Only update side for inactive levels to avoid disrupting active orders
-            if level.state == GridLevelStates.NOT_ACTIVE:
-                level.side = (
-                    TradeType.SELL if level.price > current_price else TradeType.BUY
-                )
 
     def process_order_canceled_event(
         self, _, market: ConnectorBase, event: OrderCancelledEvent
     ):
         """
-        This method is responsible for processing the order canceled event and immediately replacing
-        canceled orders with correct dynamic sides (like grid_strike behavior).
-        Only replaces orders if the executor is still running (not shutting down).
+        This method is responsible for processing the order canceled event
         """
         self.update_grid_levels()
         levels_open_order_placed = [
@@ -1169,49 +849,19 @@ class GridExecutor(ExecutorBase):
         levels_close_order_placed = [
             level for level in self.levels_by_state[GridLevelStates.CLOSE_ORDER_PLACED]
         ]
-
-        canceled_level = None
-
         for level in levels_open_order_placed:
             if event.order_id == level.active_open_order.order_id:
                 self._canceled_orders.append(level.active_open_order.order_id)
                 self.max_open_creation_timestamp = 0
-                level.reset_open_order()  # Level becomes NOT_ACTIVE
-                canceled_level = level
-                break
-
+                level.reset_open_order()
         for level in levels_close_order_placed:
             if event.order_id == level.active_close_order.order_id:
                 self._canceled_orders.append(level.active_close_order.order_id)
                 self.max_close_creation_timestamp = 0
-                level.reset_close_order()  # Level becomes OPEN_ORDER_FILLED
-
+                level.reset_close_order()
         if self._close_order and event.order_id == self._close_order.order_id:
             self._canceled_orders.append(self._close_order.order_id)
             self._close_order = None
-
-        # Instant replacement logic (like grid_strike): immediately replace canceled open orders
-        # ONLY if the executor is still running (not shutting down)
-        if canceled_level is not None and self.status == RunnableStatus.RUNNING:
-            self._instantly_replace_canceled_order(canceled_level)
-
-    def _instantly_replace_canceled_order(self, level: GridLevel):
-        """
-        Instantly replace a canceled order with correct dynamic side (grid_strike behavior).
-        This handles external cancellations from exchange UI.
-        """
-        current_price = self.mid_price
-
-        # Determine correct side based on current price
-        correct_side = TradeType.SELL if level.price > current_price else TradeType.BUY
-        level.side = correct_side
-
-        # Immediately place replacement order
-        self.logger().info(
-            f"Executor ID: {self.config.id} - Order canceled externally on level {level.id}, "
-            f"instantly replacing with {correct_side.name} order"
-        )
-        self._place_dynamic_order(level)
 
     def process_order_failed_event(self, _, market, event: MarketOrderFailureEvent):
         """
