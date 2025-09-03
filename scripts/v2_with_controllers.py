@@ -1,6 +1,8 @@
 import os
 from decimal import Decimal
 from typing import Dict, List, Optional, Set
+from pydantic_core import to_jsonable_python
+import json
 
 from hummingbot.client.hummingbot_application import HummingbotApplication
 from hummingbot.connector.connector_base import ConnectorBase
@@ -89,9 +91,35 @@ class V2WithControllers(StrategyV2Base):
                 HummingbotApplication.main_application().stop()
 
     def send_performance_report(self):
-        if self.current_timestamp - self._last_performance_report_timestamp >= self.performance_report_interval and self._pub:
-            performance_reports = {controller_id: self.get_performance_report(controller_id).dict() for controller_id in self.controllers.keys()}
-            self._pub(performance_reports)
+        if (
+            self.current_timestamp - self._last_performance_report_timestamp
+            >= self.performance_report_interval
+        ):
+            # Build performance payload and embed only serialized custom_info under a safe sentinel
+            performance_reports = {}
+            for controller_id in self.controllers.keys():
+                perf_model = self.get_performance_report(controller_id)
+                if perf_model is None:
+                    continue
+                perf = perf_model.dict()
+                executors = self.get_executors_by_controller(controller_id)
+                custom_infos = [
+                    to_jsonable_python(getattr(e, "custom_info", {}), fallback=str)
+                    for e in executors
+                ]
+                ps = perf.get("positions_summary", [])
+                ps.append({"__custom_info__": custom_infos})
+                perf["positions_summary"] = ps
+                performance_reports[controller_id] = perf
+
+            # Optional debug snapshot using JSON-safe conversion
+            try:
+                snapshot = to_jsonable_python(performance_reports, fallback=str)
+                self.logger().info(f"pnldb: {json.dumps(snapshot)[:2000]}")
+            except Exception:
+                self.logger().info(f"pnldeb:Error serializing performance reports: {e}")
+
+            # self._pub(performance_reports)
             self._last_performance_report_timestamp = self.current_timestamp
 
     def check_manual_kill_switch(self):
