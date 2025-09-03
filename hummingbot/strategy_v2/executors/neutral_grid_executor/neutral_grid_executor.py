@@ -1010,11 +1010,8 @@ class NeutralGridExecutor(ExecutorBase):
         )
 
         return {
-            "levels_by_state": {
-                key.name: value for key, value in self.levels_by_state.items()
-            },
-            "filled_orders": self._filled_orders,
-            "held_position_orders": self._held_position_orders,
+            "break_even_price": self.position_break_even_price,
+            "position_size_base": self.position_size_base,
             "held_position_value": held_position_value,
             "failed_orders": self._failed_orders,
             "canceled_orders": self._canceled_orders,
@@ -1026,7 +1023,6 @@ class NeutralGridExecutor(ExecutorBase):
             "realized_pnl_pct": self.realized_pnl_pct,
             "position_size_quote": self.position_size_quote,
             "position_fees_quote": self.position_fees_quote,
-            "break_even_price": self.position_break_even_price,
             "position_pnl_quote": self.position_pnl_quote,
             "open_liquidity_placed": self.open_liquidity_placed,
             "close_liquidity_placed": self.close_liquidity_placed,
@@ -1150,9 +1146,6 @@ class NeutralGridExecutor(ExecutorBase):
                 order_json = level.active_close_order.order.to_json()
                 if order_json not in self._filled_orders:
                     self._filled_orders.append(order_json)
-                    self.logger().debug(
-                        f"Added completed order {order_id} to PNL tracking"
-                    )
                 return
 
         # Check main close order
@@ -1165,18 +1158,12 @@ class NeutralGridExecutor(ExecutorBase):
             order_json = self._close_order.order.to_json()
             if order_json not in self._filled_orders:
                 self._filled_orders.append(order_json)
-                self.logger().debug(
-                    f"Added completed close order {order_id} to PNL tracking"
-                )
 
     def _handle_dynamic_grid_fill(self, filled_order_id: str):
         """
         Handle dynamic grid logic when an order is filled.
         Check i+1 and i-1 levels and place opposite orders if they're empty.
         """
-        self.logger().debug(
-            f"AutoFillDeb: Handling dynamic grid fill for order: {filled_order_id}"
-        )
 
         # Find which level was filled
         filled_level_index = None
@@ -1202,15 +1189,7 @@ class NeutralGridExecutor(ExecutorBase):
                     break
 
         if filled_level_index is None or filled_level is None:
-            self.logger().debug(
-                f"AutoFillDeb: Order {filled_order_id} not found in any grid level or not filled"
-            )
             return
-
-        self.logger().info(
-            f"AutoFillDeb: Order filled at level {filled_level_index} ({filled_level.id}), "
-            f"checking adjacent levels for placement"
-        )
 
         # Check adjacent levels and place opposite orders
         self._place_adjacent_orders(filled_level_index, filled_level)
@@ -1221,9 +1200,6 @@ class NeutralGridExecutor(ExecutorBase):
         Handles all states: NOT_ACTIVE, OPEN_ORDER_FILLED (needs remake), etc.
         """
         current_price = self.mid_price
-        self.logger().debug(
-            f"AutoFillDeb: Checking adjacent levels for filled_index: {filled_index}, current_price: {current_price}"
-        )
 
         # Check level above (i+1) for SELL order
         if filled_index + 1 < len(self.grid_levels):
@@ -1445,7 +1421,6 @@ class NeutralGridExecutor(ExecutorBase):
         3. Unrealized PnL = remaining position marked to current market price
         4. All volume tracking and metrics work as expected
         """
-        self.logger().info("=== PROFESSIONAL PNL CALCULATION START ===")
 
         if len(self._filled_orders) == 0:
             self.logger().info("No filled orders - resetting all PnL metrics to zero")
@@ -1453,11 +1428,6 @@ class NeutralGridExecutor(ExecutorBase):
             return
 
         # DEBUG: Log available keys for troubleshooting
-        if len(self._filled_orders) > 0:
-            sample_order = self._filled_orders[0]
-            self.logger().info(
-                f"DEBUG: Available order keys: {list(sample_order.keys())}"
-            )
 
         try:
             # Sort orders by actual fill timestamp for chronological processing
@@ -1480,23 +1450,7 @@ class NeutralGridExecutor(ExecutorBase):
 
             sorted_orders = sorted(self._filled_orders, key=get_fill_timestamp)
 
-            self.logger().info(
-                f"Processing {len(sorted_orders)} orders chronologically"
-            )
-
             # Debug: Log order sequence with timestamps
-            for i, order in enumerate(sorted_orders):
-                side = order.get("trade_type", "UNKNOWN")
-                price = order.get("price", 0)
-                creation_ts = order.get("creation_timestamp", 0)
-                update_ts = order.get("last_update_timestamp", 0)
-
-                # Get actual fill timestamp
-                fill_ts = get_fill_timestamp(order)
-
-                self.logger().info(
-                    f"DEBUG Order {i + 1}: {side} @ {price} (created: {creation_ts}, updated: {update_ts}, fill: {fill_ts})"
-                )
 
             # Initialize tracking variables
             position_size_base = Decimal("0")  # Current position size
@@ -1530,11 +1484,6 @@ class NeutralGridExecutor(ExecutorBase):
                         avg_price = Decimal(str(order.get("price", 0)))
 
                     total_fees += order_fees
-
-                    self.logger().info(
-                        f"Order {i + 1}: {trade_type} {float(executed_base):.6f} @ {float(avg_price):.4f} "
-                        f"(fee: {float(order_fees):.4f})"
-                    )
 
                     # === SIMPLIFIED UNIFIED POSITION TRACKING ===
                     # Calculate position change (+ for BUY, - for SELL)
@@ -1591,10 +1540,6 @@ class NeutralGridExecutor(ExecutorBase):
                                     position_cost_total = Decimal("0")
                                     position_fees_total = Decimal("0")
 
-                                self.logger().info(
-                                    f"  BUY Cover: {float(cover_amount):.6f} from short avg {float(avg_short_price):.4f} using {float(avg_price):.4f}, PnL {float(cover_pnl):.4f}"
-                                )
-
                             # Any remaining buy opens/adds to long
                             remaining_buy = executed_base - cover_amount
                             if remaining_buy > 0:
@@ -1616,9 +1561,6 @@ class NeutralGridExecutor(ExecutorBase):
                         else:
                             new_avg_cost = Decimal("0")
 
-                        self.logger().info(
-                            f"  BUY: Position {float(prev_pos):.6f} -> {float(position_size_base):.6f}, Avg Cost: {float(new_avg_cost):.4f} (fees: {float(order_fees):.4f} tracked separately)"
-                        )
                     else:  # SELL
                         # SELL can: (a) reduce long, (b) reduce long and open short, (c) add to short
                         prev_pos = position_size_base
@@ -1655,10 +1597,6 @@ class NeutralGridExecutor(ExecutorBase):
                                     position_cost_total = Decimal("0")
                                     position_fees_total = Decimal("0")
 
-                                self.logger().info(
-                                    f"  SELL Reduce: {float(sell_from_long):.6f} from long avg {float(current_avg_cost):.4f} at {float(avg_price):.4f}, PnL {float(trade_realized_pnl):.4f}"
-                                )
-
                             # If we sold more than we had, open short with remainder
                             remaining_sell = executed_base - sell_from_long
                             if remaining_sell > 0:
@@ -1683,10 +1621,6 @@ class NeutralGridExecutor(ExecutorBase):
                             )
                         else:
                             new_avg_cost = Decimal("0")
-
-                        self.logger().info(
-                            f"  SELL: Position {float(prev_pos):.6f} -> {float(new_position_size):.6f}, Avg {float(new_avg_cost):.4f} (fees: {float(order_fees):.4f})"
-                        )
 
                     # Update position size
                     position_size_base = new_position_size
@@ -1723,11 +1657,6 @@ class NeutralGridExecutor(ExecutorBase):
                     current_market_value = position_size_base * self.mid_price
                     unrealized_pnl = current_market_value - position_cost_total
 
-                    self.logger().info(
-                        f"LONG position: {float(position_size_base):.6f} units @ {float(current_avg_cost):.4f} avg cost, "
-                        f"Market value: {float(current_market_value):.4f}, Unrealized PnL: {float(unrealized_pnl):.4f}"
-                    )
-
                 else:
                     # Short position
                     current_market_value = abs(position_size_base) * self.mid_price
@@ -1738,11 +1667,6 @@ class NeutralGridExecutor(ExecutorBase):
                         position_cost_total / abs(position_size_base)
                         if position_size_base != 0
                         else Decimal("0")
-                    )
-
-                    self.logger().info(
-                        f"SHORT position: {float(abs(position_size_base)):.6f} units @ {float(current_avg_cost):.4f} avg cost, "
-                        f"Market value: {float(current_market_value):.4f}, Unrealized PnL: {float(unrealized_pnl):.4f}"
                     )
 
                 # Set position metrics
@@ -1759,7 +1683,6 @@ class NeutralGridExecutor(ExecutorBase):
 
             else:
                 # No remaining position
-                self.logger().info("No remaining position - all PnL is realized")
                 self.position_size_base = Decimal("0")
                 self.position_size_quote = Decimal("0")
                 self.position_break_even_price = Decimal("0")
@@ -1786,35 +1709,7 @@ class NeutralGridExecutor(ExecutorBase):
             # === FINAL SUMMARY ===
             net_pnl = self.realized_pnl_quote + self.position_pnl_quote
 
-            self.logger().info("=== PROFESSIONAL PNL CALCULATION RESULTS ===")
-            self.logger().info(
-                "🎯 STANDARD APPROACH: Cost basis excludes fees, fees subtracted explicitly in PnL"
-            )
-            self.logger().info(
-                f"📊 Orders Processed: {len(sorted_orders)} ({buy_count} buys, {sell_count} sells)"
-            )
-            self.logger().info(
-                f"💰 Volume: Buy ${float(total_buy_volume):.4f}, Sell ${float(total_sell_volume):.4f}"
-            )
-            self.logger().info(
-                f"💵 Realized PnL: ${float(self.realized_pnl_quote):.4f} (includes explicit fee deduction)"
-            )
-            self.logger().info(
-                f"📈 Unrealized PnL: ${float(self.position_pnl_quote):.4f}"
-            )
-            self.logger().info(f"🎯 Net PnL: ${float(net_pnl):.4f}")
-            self.logger().info(
-                f"💸 Total Fees: ${float(total_fees):.4f} (tracked separately from cost basis)"
-            )
-            self.logger().info(
-                f"📦 Position: {float(self.position_size_base):.6f} @ ${float(self.position_break_even_price):.4f} (pure avg cost)"
-            )
-            self.logger().info("✅ Cost basis now matches exchange UI standards!")
-            self.logger().info("=== CALCULATION COMPLETE ===")
         except Exception as e:
-            self.logger().error(
-                f"Critical error in PnL calculation: {e}", exc_info=True
-            )
             self._reset_all_metrics()
 
     def _reset_all_metrics(self):
