@@ -20,6 +20,8 @@ class NeutralGridExecutorConfig(ExecutorConfigBase):
     start_price: Decimal
     end_price: Decimal
     side: TradeType = TradeType.BUY
+    # Mode
+    is_directional: bool = False
     # Profiling
     total_amount_quote: Decimal
     n_levels: int = 10  # Number of grid levels to create
@@ -33,6 +35,11 @@ class NeutralGridExecutorConfig(ExecutorConfigBase):
     order_frequency: int = 0
     activation_bounds: Optional[Decimal] = None
     safe_extra_spread: Decimal = Decimal("0.0001")
+    # Trailing (window sliding) parameters
+    grid_trailing_enabled: bool = False
+    grid_trailing_cooldown_s: int = 1
+    trailing_up_limit: Optional[Decimal] = None
+    trailing_down_limit: Optional[Decimal] = None
     # Risk Management
     triple_barrier_config: TripleBarrierConfig
     leverage: int = 20
@@ -66,7 +73,11 @@ class GridLevel(BaseModel):
     state: GridLevelStates = GridLevelStates.NOT_ACTIVE
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    def update_state(self):
+    def update_state(self, logger=None):
+        if logger:
+            logger().info(
+                f"TrailingDeb: levelDeb {self.active_open_order.order_id if self.active_open_order else None} {self.state} {self.active_open_order.is_filled if self.active_open_order else None}="
+            )
         if self.active_open_order is None:
             self.state = GridLevelStates.NOT_ACTIVE
         elif self.active_open_order.is_filled:
@@ -78,6 +89,9 @@ class GridLevel(BaseModel):
                 self.state = GridLevelStates.COMPLETE
             else:
                 self.state = GridLevelStates.CLOSE_ORDER_PLACED
+
+    def reset_as_filled(self):
+        self.state = GridLevelStates.OPEN_ORDER_FILLED
 
     def reset_open_order(self):
         self.active_open_order = None

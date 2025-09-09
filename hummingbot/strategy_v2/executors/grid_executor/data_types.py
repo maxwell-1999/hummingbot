@@ -66,7 +66,11 @@ class GridLevel(BaseModel):
     state: GridLevelStates = GridLevelStates.NOT_ACTIVE
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    def update_state(self):
+    def update_state(self, logger=None):
+        if logger:
+            logger().info(
+                f"TrailingDeb: levelDeb {self.active_open_order.order_id if self.active_open_order else None} {self.state} {self.active_open_order.is_filled if self.active_open_order else None}="
+            )
         if self.active_open_order is None:
             self.state = GridLevelStates.NOT_ACTIVE
         elif self.active_open_order.is_filled:
@@ -78,6 +82,9 @@ class GridLevel(BaseModel):
                 self.state = GridLevelStates.COMPLETE
             else:
                 self.state = GridLevelStates.CLOSE_ORDER_PLACED
+
+    def reset_as_filled(self):
+        self.state = GridLevelStates.OPEN_ORDER_FILLED
 
     def reset_open_order(self):
         self.active_open_order = None
