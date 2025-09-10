@@ -6,17 +6,9 @@ from decimal import Decimal
 from typing import Dict, List, Optional, Union
 
 from hummingbot.connector.connector_base import ConnectorBase
-from hummingbot.core.data_type.common import (
-    OrderType,
-    PositionAction,
-    PriceType,
-    TradeType,
-)
-from hummingbot.core.data_type.order_candidate import (
-    OrderCandidate,
-    PerpetualOrderCandidate,
-)
+from hummingbot.core.data_type.common import OrderType, PositionAction, PriceType, TradeType
 from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderState
+from hummingbot.core.data_type.order_candidate import OrderCandidate, PerpetualOrderCandidate
 from hummingbot.core.event.events import (
     BuyOrderCompletedEvent,
     BuyOrderCreatedEvent,
@@ -30,16 +22,12 @@ from hummingbot.logger import HummingbotLogger
 from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
 from hummingbot.strategy_v2.executors.executor_base import ExecutorBase
 from hummingbot.strategy_v2.executors.neutral_grid_executor.data_types import (
-    NeutralGridExecutorConfig,
     GridLevel,
     GridLevelStates,
+    NeutralGridExecutorConfig,
 )
 from hummingbot.strategy_v2.models.base import RunnableStatus
-from hummingbot.strategy_v2.models.executors import (
-    CloseType,
-    TrackedOrder,
-    DummyTrackedFilledOrder,
-)
+from hummingbot.strategy_v2.models.executors import CloseType, DummyTrackedFilledOrder, TrackedOrder
 from hummingbot.strategy_v2.utils.distributions import Distributions
 
 
@@ -1543,16 +1531,26 @@ class NeutralGridExecutor(ExecutorBase):
         mid = self.mid_price
         gap = self.grid_placing_difference
 
+        # Directional trailing enablement based on config limits
+        trailing_up_limit_cfg = getattr(self.config, "trailing_up_limit", None)
+        trailing_down_limit_cfg = getattr(self.config, "trailing_down_limit", None)
+        allow_up = trailing_up_limit_cfg is None or Decimal(
+            str(trailing_up_limit_cfg)
+        ) != Decimal("0")
+        allow_down = trailing_down_limit_cfg is None or Decimal(
+            str(trailing_down_limit_cfg)
+        ) != Decimal("0")
+
         # Check if price has moved beyond bounds
         if mid > upper:
             steps_up = (mid - upper) // self.grid_placing_difference
 
-            if steps_up >= 1:
+            if steps_up >= 1 and allow_up:
                 self._slide_window_up()
         elif mid < lower:
             steps_down = (lower - mid) // self.grid_placing_difference
 
-            if steps_down >= 1:
+            if steps_down >= 1 and allow_down:
                 self._slide_window_down()
         # else:
         #     self.logger().debug("TrailingDeb: Price within bounds, no trailing needed")
@@ -1580,6 +1578,18 @@ class NeutralGridExecutor(ExecutorBase):
         self.logger().info(
             f"TrailingDeb: Bottom level {lowest_level.id} at price {lowest_level.price} | current_max={current_max_price}"
         )
+
+        # Enforce upward trailing limit (if configured and non-zero)
+        trailing_up_limit_cfg = getattr(self.config, "trailing_up_limit", None)
+        if trailing_up_limit_cfg is not None and Decimal(
+            str(trailing_up_limit_cfg)
+        ) != Decimal("0"):
+            proposed_new_top = current_max_price + gap
+            if proposed_new_top > Decimal(str(trailing_up_limit_cfg)):
+                self.logger().info(
+                    f"TrailingDeb: Upward rotate blocked - proposed_top {proposed_new_top} exceeds trailing_up_limit {trailing_up_limit_cfg}"
+                )
+                return
 
         # Cancel existing open order on the level we are rotating
         if lowest_level.active_open_order and lowest_level.active_open_order.order_id:
@@ -1654,6 +1664,18 @@ class NeutralGridExecutor(ExecutorBase):
         self.logger().info(
             f"TrailingDeb: Top level {highest_level.id} at price {highest_level.price} | current_min={current_min_price}"
         )
+
+        # Enforce downward trailing limit (if configured and non-zero)
+        trailing_down_limit_cfg = getattr(self.config, "trailing_down_limit", None)
+        if trailing_down_limit_cfg is not None and Decimal(
+            str(trailing_down_limit_cfg)
+        ) != Decimal("0"):
+            proposed_new_bottom = current_min_price - gap
+            if proposed_new_bottom < Decimal(str(trailing_down_limit_cfg)):
+                self.logger().info(
+                    f"TrailingDeb: Downward rotate blocked - proposed_bottom {proposed_new_bottom} below trailing_down_limit {trailing_down_limit_cfg}"
+                )
+                return
 
         # Cancel existing open order on the level we are rotating
         if highest_level.active_open_order and highest_level.active_open_order.order_id:
