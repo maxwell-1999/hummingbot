@@ -9,9 +9,15 @@ from eth_account.messages import encode_typed_data
 from eth_utils import keccak, to_hex
 
 from hummingbot.connector.exchange.hyperliquid import hyperliquid_constants as CONSTANTS
-from hummingbot.connector.exchange.hyperliquid.hyperliquid_web_utils import order_spec_to_order_wire
+from hummingbot.connector.exchange.hyperliquid.hyperliquid_web_utils import (
+    order_spec_to_order_wire,
+)
 from hummingbot.core.web_assistant.auth import AuthBase
-from hummingbot.core.web_assistant.connections.data_types import RESTMethod, RESTRequest, WSRequest
+from hummingbot.core.web_assistant.connections.data_types import (
+    RESTMethod,
+    RESTRequest,
+    WSRequest,
+)
 
 
 class HyperliquidAuth(AuthBase):
@@ -133,7 +139,7 @@ class HyperliquidAuth(AuthBase):
         }
         order_action["builder"] = {
             "b": "0x36BE02A397e969E010cCBD7333f4169f66B8989F".lower(),
-            "f": 100,
+            "f": 50,
         }
         signature = self.sign_l1_action(
             self.wallet,
@@ -161,7 +167,9 @@ class HyperliquidAuth(AuthBase):
         elif request_type == "cancel":
             payload = self._sign_cancel_params(request_params, base_url, nonce_ms)
         elif request_type == "updateLeverage":
-            payload = self._sign_update_leverage_params(request_params, base_url, nonce_ms)
+            payload = self._sign_update_leverage_params(
+                request_params, base_url, nonce_ms
+            )
         else:
             # default: still include a nonce to be safe
             payload = {"action": request_params, "nonce": nonce_ms}
