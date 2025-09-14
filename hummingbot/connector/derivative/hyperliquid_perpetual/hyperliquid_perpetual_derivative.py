@@ -770,7 +770,8 @@ class HyperliquidPerpetualDerivative(PerpetualDerivativePyBase):
                         trading_pair,
                         min_base_amount_increment=step_size,
                         min_price_increment=price_size,
-                        min_order_size=_min_order_size,
+                        min_order_size=Decimal("0"),
+                        min_notional_size=Decimal("12"),
                         buy_order_collateral_token=collateral_token,
                         sell_order_collateral_token=collateral_token,
                     )
