@@ -6,9 +6,17 @@ from decimal import Decimal
 from typing import Dict, List, Optional, Union
 
 from hummingbot.connector.connector_base import ConnectorBase
-from hummingbot.core.data_type.common import OrderType, PositionAction, PriceType, TradeType
+from hummingbot.core.data_type.common import (
+    OrderType,
+    PositionAction,
+    PriceType,
+    TradeType,
+)
 from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderState
-from hummingbot.core.data_type.order_candidate import OrderCandidate, PerpetualOrderCandidate
+from hummingbot.core.data_type.order_candidate import (
+    OrderCandidate,
+    PerpetualOrderCandidate,
+)
 from hummingbot.core.event.events import (
     BuyOrderCompletedEvent,
     BuyOrderCreatedEvent,
@@ -27,7 +35,11 @@ from hummingbot.strategy_v2.executors.neutral_grid_executor.data_types import (
     NeutralGridExecutorConfig,
 )
 from hummingbot.strategy_v2.models.base import RunnableStatus
-from hummingbot.strategy_v2.models.executors import CloseType, DummyTrackedFilledOrder, TrackedOrder
+from hummingbot.strategy_v2.models.executors import (
+    CloseType,
+    DummyTrackedFilledOrder,
+    TrackedOrder,
+)
 from hummingbot.strategy_v2.utils.distributions import Distributions
 
 
@@ -69,6 +81,7 @@ class NeutralGridExecutor(ExecutorBase):
             connectors=[config.connector_name],
             update_interval=update_interval,
         )
+        self._trails = []
         self.open_order_price_type = (
             PriceType.BestBid if config.side == TradeType.BUY else PriceType.BestAsk
         )
@@ -1159,6 +1172,19 @@ class NeutralGridExecutor(ExecutorBase):
         )
 
         return {
+            "active_range": [
+                (
+                    self.grid_levels[0].price
+                    if len(self.grid_levels) > 0
+                    else Decimal("NaN")
+                ),
+                (
+                    self.grid_levels[-1].price
+                    if len(self.grid_levels) > 0
+                    else Decimal("NaN")
+                ),
+            ],
+            "trails": self._trails,
             "break_even_price": self.position_break_even_price,
             "position_size_base": self.position_size_base,
             "held_position_value": held_position_value,
@@ -1631,6 +1657,12 @@ class NeutralGridExecutor(ExecutorBase):
             prev_top_level = self.grid_levels[-2]
             prev_top_level.side = TradeType.BUY
             prev_top_level.reset_level()
+            self._trails.append(
+                {
+                    "price": prev_top_level.price,
+                    "side": "up_trail",
+                }
+            )
         else:
             self.logger().info(
                 "TrailingDeb: Not enough levels to consider previous top (n < 2)"
@@ -1716,6 +1748,12 @@ class NeutralGridExecutor(ExecutorBase):
             next_low_level = self.grid_levels[1]
             next_low_level.side = TradeType.SELL
             next_low_level.reset_level()
+            self._trails.append(
+                {
+                    "price": next_low_level.price,
+                    "side": "down_trail",
+                }
+            )
             self.logger().info(
                 f"modified level: {next_low_level.price} {next_low_level.state.name}"
             )
