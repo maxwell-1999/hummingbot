@@ -1,5 +1,7 @@
 import asyncio
 import logging
+from decimal import Decimal, ROUND_DOWN
+
 import math
 import time
 from decimal import Decimal
@@ -41,6 +43,52 @@ from hummingbot.strategy_v2.models.executors import (
     TrackedOrder,
 )
 from hummingbot.strategy_v2.utils.distributions import Distributions
+# M
+# MDD.update(pnl):
+#  self.peak = current_price
+# self.trough = current_price
+
+
+# MDD.calculate_mdd(initial_investment):
+# self.investment = initial_investment
+#     return (self.peak - self.trough) / self.peak
+
+
+class MDD:
+    investment: Decimal = Decimal("0")
+    best_pnl: Decimal = Decimal("0")
+    mdd: Decimal = Decimal("0")
+    cdd: Decimal = Decimal("0")
+
+    def __init__(self, investment: Decimal):
+        self.investment = investment
+        self.best_pnl = Decimal("0")
+        self.mdd = Decimal("0")
+        self.cdd = Decimal("0")
+
+    def update(self, pnl: Decimal, logger: HummingbotLogger):
+        if pnl > self.best_pnl:
+            self.best_pnl = pnl
+            self.cdd = Decimal("0")
+        elif pnl + self.investment <= 0:
+            self.mdd = Decimal("100")
+        else:
+            curr_value = self.investment + pnl
+            best_value = self.investment + self.best_pnl
+            self.cdd = (best_value - curr_value) / best_value
+            if self.mdd == Decimal("0"):
+                self.mdd = self.cdd
+            else:
+                self.mdd = max(self.mdd, self.cdd)
+        return self.cdd
+
+    def to_json(self):
+        return {
+            "investment": self.investment,
+            "best_pnl": self.best_pnl,
+            "mdd": (self.mdd * 100).quantize(Decimal("0.01")),
+            "cdd": (self.cdd * 100).quantize(Decimal("0.01")),
+        }
 
 
 class NeutralGridExecutor(ExecutorBase):
@@ -101,6 +149,7 @@ class NeutralGridExecutor(ExecutorBase):
         self._initial_order_placed = False
         self._base_amount_per_level = Decimal("0")
         self._quote_amount_per_level = Decimal("0")
+        self._mdd = MDD(Decimal(self.config.total_amount_quote / self.config.leverage))
         self._initial_amount_base = Decimal("0")
         self.logger().info(
             "InitOrder: initialized fields (_initial_order_level, flags, per-level sizing)"
@@ -826,7 +875,9 @@ class NeutralGridExecutor(ExecutorBase):
                 f"├─ 📋 Filled Orders: {filled_orders_count}\n"
                 f"├─ 🔄 Active Orders: {active_orders}/{total_levels}\n"
                 f"├─ 💹 Mid Price: {float(self.mid_price):.4f}\n"
-                f"└─ ⚡ Buy Vol: {float(self.realized_buy_size_quote):.4f} | Sell Vol: {float(self.realized_sell_size_quote):.4f}"
+                f"└─ ⚡ Buy Vol: {float(self.realized_buy_size_quote):.4f} | Sell Vol: {float(self.realized_sell_size_quote):.4f}\n"
+                f"├─ 💧 MDD: {self._mdd.to_json()['mdd']}%\n"
+                f"├─ 💧 CDD: {self._mdd.to_json()['cdd']}%\n"
             )
 
             # Extra: print filled orders brief (price, quote amount, side, fees)
@@ -854,104 +905,6 @@ class NeutralGridExecutor(ExecutorBase):
 
         except Exception as e:
             self.logger().error(f"Error logging trading stats: {e}")
-
-    def get_trading_stats_dict(self) -> Dict:
-        """
-        Get comprehensive trading statistics as a dictionary.
-        This returns the same data that would be available via API.
-        """
-        try:
-            return {
-                "executor_id": self.config.id,
-                "trading_pair": self.config.trading_pair,
-                "mid_price": float(self.mid_price),
-                # Volume metrics (API equivalent)
-                "volume_traded": float(self.filled_amount_quote),
-                "realized_buy_volume": float(self.realized_buy_size_quote),
-                "realized_sell_volume": float(self.realized_sell_size_quote),
-                # PnL metrics (API equivalent)
-                "net_pnl_quote": float(self.get_net_pnl_quote()),
-                "net_pnl_pct": float(self.get_net_pnl_pct()) * 100,
-                "realized_pnl_quote": float(self.realized_pnl_quote),
-                "unrealized_pnl_quote": float(self.position_pnl_quote),
-                # Fee metrics
-                "cumulative_fees_quote": float(self.get_cum_fees_quote()),
-                "realized_fees_quote": float(self.realized_fees_quote),
-                "position_fees_quote": float(self.position_fees_quote),
-                # Position metrics
-                "position_size_quote": float(self.position_size_quote),
-                "position_size_base": float(self.position_size_base),
-                "break_even_price": float(self.position_break_even_price),
-                # Order metrics
-                "filled_orders_count": len(self._filled_orders),
-                "failed_orders_count": len(self._failed_orders),
-                "canceled_orders_count": len(self._canceled_orders),
-                # Grid metrics
-                "total_levels": len(self.grid_levels),
-                "active_orders": len(
-                    self.levels_by_state.get(GridLevelStates.OPEN_ORDER_PLACED, [])
-                ),
-                "open_order_filled": len(
-                    self.levels_by_state.get(GridLevelStates.OPEN_ORDER_FILLED, [])
-                ),
-                "close_order_placed": len(
-                    self.levels_by_state.get(GridLevelStates.CLOSE_ORDER_PLACED, [])
-                ),
-                "complete_levels": len(
-                    self.levels_by_state.get(GridLevelStates.COMPLETE, [])
-                ),
-                # Liquidity metrics
-                "open_liquidity_placed": float(self.open_liquidity_placed),
-                "close_liquidity_placed": float(self.close_liquidity_placed),
-                # Status
-                "status": self.status.name,
-                "is_trading": self.is_trading,
-                "timestamp": self._strategy.current_timestamp,
-            }
-        except Exception as e:
-            self.logger().error(f"Error getting trading stats: {e}")
-            return {}
-
-    def print_trading_stats(self):
-        """
-        Print comprehensive trading statistics to console.
-        Call this method manually to get instant stats display.
-        """
-        stats = self.get_trading_stats_dict()
-        if not stats:
-            return
-
-        print(f"\n{'=' * 60}")
-        print(f"🚀 NEUTRAL GRID EXECUTOR STATS - {stats['executor_id']}")
-        print(f"{'=' * 60}")
-        print(f"📊 Trading Pair: {stats['trading_pair']}")
-        print(f"💹 Mid Price: {stats['mid_price']:.4f}")
-        print(f"⚡ Status: {stats['status']} | Trading: {stats['is_trading']}")
-        print(f"\n📈 VOLUME & PNL METRICS:")
-        print(f"├─ 💰 Volume Traded: {stats['volume_traded']:.4f}")
-        print(
-            f"├─ 📈 Net PnL: {stats['net_pnl_quote']:.4f} ({stats['net_pnl_pct']:.2f}%)"
-        )
-        print(f"├─ 💵 Realized PnL: {stats['realized_pnl_quote']:.4f}")
-        print(f"├─ 📊 Unrealized PnL: {stats['unrealized_pnl_quote']:.4f}")
-        print(f"└─ 💸 Total Fees: {stats['cumulative_fees_quote']:.4f}")
-        print(f"\n🎯 POSITION METRICS:")
-        print(f"├─ 📦 Position Size: {stats['position_size_quote']:.4f} quote")
-        print(f"├─ 🎯 Break Even: {stats['break_even_price']:.4f}")
-        print(f"├─ ⬆️ Buy Volume: {stats['realized_buy_volume']:.4f}")
-        print(f"└─ ⬇️ Sell Volume: {stats['realized_sell_volume']:.4f}")
-        print(f"\n📋 ORDER METRICS:")
-        print(f"├─ ✅ Filled Orders: {stats['filled_orders_count']}")
-        print(f"├─ ❌ Failed Orders: {stats['failed_orders_count']}")
-        print(f"├─ 🚫 Canceled Orders: {stats['canceled_orders_count']}")
-        print(f"└─ 🔄 Active Orders: {stats['active_orders']}/{stats['total_levels']}")
-        print(f"\n🏗️ GRID METRICS:")
-        print(f"├─ 🔵 Open Filled: {stats['open_order_filled']}")
-        print(f"├─ 🔴 Close Placed: {stats['close_order_placed']}")
-        print(f"├─ ✅ Complete: {stats['complete_levels']}")
-        print(f"├─ 💧 Open Liquidity: {stats['open_liquidity_placed']:.4f}")
-        print(f"└─ 💧 Close Liquidity: {stats['close_liquidity_placed']:.4f}")
-        print(f"{'=' * 60}\n")
 
     def get_open_orders_to_create(self):
         """
@@ -1184,6 +1137,7 @@ class NeutralGridExecutor(ExecutorBase):
                     else Decimal("NaN")
                 ),
             ],
+            "mdd": self._mdd.to_json(),
             "trails": self._trails,
             "break_even_price": self.position_break_even_price,
             "position_size_base": self.position_size_base,
@@ -1659,7 +1613,8 @@ class NeutralGridExecutor(ExecutorBase):
             prev_top_level.reset_level()
             self._trails.append(
                 {
-                    "price": prev_top_level.price,
+                    "start_price": self.config.start_price,
+                    "end_price": self.config.end_price,
                     "side": "up_trail",
                     "time": self._strategy.current_timestamp,
                 }
@@ -1751,7 +1706,8 @@ class NeutralGridExecutor(ExecutorBase):
             next_low_level.reset_level()
             self._trails.append(
                 {
-                    "price": next_low_level.price,
+                    "start_price": self.config.start_price,
+                    "end_price": self.config.end_price,
                     "side": "down_trail",
                     "time": self._strategy.current_timestamp,
                 }
@@ -2090,6 +2046,13 @@ class NeutralGridExecutor(ExecutorBase):
                 else Decimal("0")
             )
 
+            net_pnl = (
+                self.realized_pnl_quote
+                + self.position_pnl_quote
+                + self.realized_fees_quote
+            )
+            self._mdd.update(net_pnl, self.logger())
+
             # Calculate unrealized PnL from remaining position
             if abs(position_size_base) > Decimal("0.000001"):  # Have remaining position
                 if position_size_base > 0:
@@ -2152,7 +2115,6 @@ class NeutralGridExecutor(ExecutorBase):
             )
 
             # === FINAL SUMMARY ===
-            net_pnl = self.realized_pnl_quote + self.position_pnl_quote
 
         except Exception as e:
             self._reset_all_metrics()
