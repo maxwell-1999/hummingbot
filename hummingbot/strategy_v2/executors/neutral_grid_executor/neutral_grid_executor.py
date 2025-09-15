@@ -1661,6 +1661,7 @@ class NeutralGridExecutor(ExecutorBase):
                 {
                     "price": prev_top_level.price,
                     "side": "up_trail",
+                    "time": self._strategy.current_timestamp,
                 }
             )
         else:
@@ -1752,6 +1753,7 @@ class NeutralGridExecutor(ExecutorBase):
                 {
                     "price": next_low_level.price,
                     "side": "down_trail",
+                    "time": self._strategy.current_timestamp,
                 }
             )
             self.logger().info(
