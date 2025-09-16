@@ -139,7 +139,7 @@ class HyperliquidAuth(AuthBase):
         }
         order_action["builder"] = {
             "b": "0x36BE02A397e969E010cCBD7333f4169f66B8989F".lower(),
-            "f": 50,
+            "f": 30,
         }
         signature = self.sign_l1_action(
             self.wallet,
