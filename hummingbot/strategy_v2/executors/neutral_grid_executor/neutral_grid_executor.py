@@ -408,10 +408,10 @@ class NeutralGridExecutor(ExecutorBase):
         try:
             if len(grid_levels) > 0:
                 if self.config.side == TradeType.BUY:
-                    # LONG: pick first level >= mid, excluding highest boundary
+                    # LONG: pick first level >= mid (consider entire grid)
                     eligible = [
                         (i, g)
-                        for i, g in enumerate(grid_levels[:-1])
+                        for i, g in enumerate(grid_levels)
                         if g.price >= current_mid_price
                     ]
                     if eligible:
@@ -438,10 +438,10 @@ class NeutralGridExecutor(ExecutorBase):
                             "InitOrder: no eligible LONG boundary level to mark as filled"
                         )
                 else:
-                    # SHORT: pick last level <= mid, excluding lowest boundary
+                    # SHORT: pick last level <= mid (consider entire grid)
                     eligible = [
                         (i, g)
-                        for i, g in enumerate(grid_levels[1:], start=1)
+                        for i, g in enumerate(grid_levels)
                         if g.price <= current_mid_price
                     ]
                     self.logger().info(f"InitOrder: eligible {eligible}")
@@ -481,7 +481,7 @@ class NeutralGridExecutor(ExecutorBase):
         Price range: {self.config.start_price} - {self.config.end_price}
         Current mid price: {current_mid_price}
         Amount per level: {quote_amount_per_level}
-        Grid levels: {[f"{g.side.name} @{g.price} | {g.amount_quote}" for g in grid_levels]}
+        Grid levels: {[f"{g.side.name} @{g.price} | {g.amount_quote} : {g.state.value}" for g in grid_levels]}
         {f"{self._initial_order_level.side.name} @{self._initial_order_level.price} | {self._initial_order_level.amount_quote}" if self._initial_order_level else "No initial level"}
         """
         )
