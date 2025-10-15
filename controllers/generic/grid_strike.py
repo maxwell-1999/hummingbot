@@ -3,13 +3,26 @@ from typing import List, Optional
 
 from pydantic import Field
 
-from hummingbot.core.data_type.common import MarketDict, OrderType, PositionMode, PriceType, TradeType
+from hummingbot.core.data_type.common import (
+    MarketDict,
+    OrderType,
+    PositionMode,
+    PriceType,
+    TradeType,
+)
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 from hummingbot.strategy_v2.controllers import ControllerBase, ControllerConfigBase
 from hummingbot.strategy_v2.executors.data_types import ConnectorPair
-from hummingbot.strategy_v2.executors.grid_executor.data_types import GridExecutorConfig
-from hummingbot.strategy_v2.executors.position_executor.data_types import TripleBarrierConfig
-from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction, ExecutorAction
+from hummingbot.strategy_v2.executors.grid_executor.data_types import (
+    GridExecutorConfig,
+)
+from hummingbot.strategy_v2.executors.position_executor.data_types import (
+    TripleBarrierConfig,
+)
+from hummingbot.strategy_v2.models.executor_actions import (
+    CreateExecutorAction,
+    ExecutorAction,
+)
 from hummingbot.strategy_v2.models.executors_info import ExecutorInfo
 
 
@@ -23,17 +36,16 @@ class GridStrikeConfig(ControllerConfigBase):
     candles_config: List[CandlesConfig] = []
 
     # Account configuration
-    leverage: int = 20
     position_mode: PositionMode = PositionMode.HEDGE
 
     # Boundaries
     connector_name: str = "binance_perpetual"
     trading_pair: str = "WLD-USDT"
-    side: TradeType = TradeType.BUY
+    side: TradeType = TradeType.SELL
 
     # Grid price boundaries
     start_price: Decimal = Field(
-        default=Decimal("95000"), json_schema_extra={"is_updatable": True}
+        default=Decimal("0"), json_schema_extra={"is_updatable": True}
     )
     end_price: Decimal = Field(
         default=Decimal("105000"), json_schema_extra={"is_updatable": True}
@@ -46,6 +58,9 @@ class GridStrikeConfig(ControllerConfigBase):
     levels: int = Field(default=3, json_schema_extra={"is_updatable": True})
     min_order_amount_quote: Decimal = Field(
         default=Decimal("5"), json_schema_extra={"is_updatable": True}
+    )
+    is_directional: bool = Field(
+        default=False, json_schema_extra={"is_updatable": True}
     )
     last_price: Decimal = Field(
         default=Decimal("118000"), json_schema_extra={"is_updatable": True}
@@ -63,6 +78,19 @@ class GridStrikeConfig(ControllerConfigBase):
         default=None, json_schema_extra={"is_updatable": True}
     )
     keep_position: bool = Field(default=False, json_schema_extra={"is_updatable": True})
+    # Trailing (window sliding)
+    grid_trailing_enabled: bool = Field(
+        default=False, json_schema_extra={"is_updatable": True}
+    )
+    grid_trailing_cooldown_s: int = Field(
+        default=30, json_schema_extra={"is_updatable": True}
+    )
+    trailing_up_limit: Optional[Decimal] = Field(
+        default=None, json_schema_extra={"is_updatable": True}
+    )
+    trailing_down_limit: Optional[Decimal] = Field(
+        default=None, json_schema_extra={"is_updatable": True}
+    )
 
     # Risk Management
     triple_barrier_config: TripleBarrierConfig = TripleBarrierConfig(
@@ -104,7 +132,11 @@ class GridStrike(ControllerBase):
         mid_price = self.market_data_provider.get_price_by_type(
             self.config.connector_name, self.config.trading_pair, PriceType.MidPrice
         )
-
+        if self.config.start_price == Decimal("0"):
+            self.config.start_price = mid_price - Decimal("20")
+            self.config.end_price = mid_price + Decimal("200")
+            self.config.trailing_up_limit = mid_price + Decimal("1050")
+            self.config.trailing_down_limit = mid_price - Decimal("1050")
         # Use configured price boundaries directly
         start_price = self.config.start_price
         end_price = self.config.end_price
@@ -121,9 +153,9 @@ class GridStrike(ControllerBase):
                         timestamp=self.market_data_provider.time(),
                         connector_name=self.config.connector_name,
                         trading_pair=self.config.trading_pair,
+                        is_directional=self.config.is_directional,
                         start_price=start_price,
                         end_price=end_price,
-                        leverage=self.config.leverage,
                         side=self.config.side,  # This will be overridden by dynamic logic
                         total_amount_quote=self.config.total_amount_quote,
                         n_levels=self.config.levels,  # Use n_levels instead of min_spread
@@ -132,6 +164,10 @@ class GridStrike(ControllerBase):
                         max_orders_per_batch=self.config.max_orders_per_batch,
                         order_frequency=self.config.order_frequency,
                         activation_bounds=self.config.activation_bounds,
+                        grid_trailing_enabled=self.config.grid_trailing_enabled,
+                        grid_trailing_cooldown_s=self.config.grid_trailing_cooldown_s,
+                        trailing_up_limit=self.config.trailing_up_limit,
+                        trailing_down_limit=self.config.trailing_down_limit,
                         triple_barrier_config=self.config.triple_barrier_config,
                         level_id=None,
                         disable_first_level_tp=self.config.disable_first_level_tp,

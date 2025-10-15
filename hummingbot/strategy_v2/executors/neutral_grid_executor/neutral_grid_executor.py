@@ -259,7 +259,6 @@ class NeutralGridExecutor(ExecutorBase):
             * min_base_increment
         )
         # Verify the quantized amount meets minimum notional
-        min_quote_amount = min_base_amount * price
 
         # Use n_levels directly from config
         n_levels = self.config.n_levels
