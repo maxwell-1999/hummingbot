@@ -20,6 +20,8 @@ class GridExecutorConfig(ExecutorConfigBase):
     start_price: Decimal
     end_price: Decimal
     side: TradeType = TradeType.BUY
+    # Mode
+    is_directional: bool = False
     # Profiling
     total_amount_quote: Decimal
     n_levels: int = 10  # Number of grid levels to create
@@ -33,9 +35,13 @@ class GridExecutorConfig(ExecutorConfigBase):
     order_frequency: int = 0
     activation_bounds: Optional[Decimal] = None
     safe_extra_spread: Decimal = Decimal("0.0001")
+    # Trailing (window sliding) parameters
+    grid_trailing_enabled: bool = False
+    grid_trailing_cooldown_s: int = 1
+    trailing_up_limit: Optional[Decimal] = None
+    trailing_down_limit: Optional[Decimal] = None
     # Risk Management
     triple_barrier_config: TripleBarrierConfig
-    leverage: int = 20
     level_id: Optional[str] = None
     deduct_base_fees: bool = False
     keep_position: bool = False
