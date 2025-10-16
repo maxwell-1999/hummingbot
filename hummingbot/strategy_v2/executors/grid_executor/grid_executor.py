@@ -151,9 +151,9 @@ class GridExecutor(ExecutorBase):
         self._quote_amount_per_level = Decimal("0")
         self._mdd = MDD(Decimal(self.config.total_amount_quote))
         self._initial_amount_base = Decimal("0")
-        self.logger().info(
-            "InitOrder: initialized fields (_initial_order_level, flags, per-level sizing)"
-        )
+        # self.logger().info(
+        #     "InitOrder: initialized fields (_initial_order_level, flags, per-level sizing)"
+        # )
         # Grid levels
         self.grid_levels = self._generate_grid_levels()
         self.levels_by_state = {state: [] for state in GridLevelStates}
@@ -161,9 +161,9 @@ class GridExecutor(ExecutorBase):
         self._filled_orders = []
         self._failed_orders = []
         self._canceled_orders = []
-        self.logger().info(
-            f"GridExecutor: Generating dynamic grid levels (TP disabled - using adjacent level logic)"
-        )
+        # self.logger().info(
+        #     f"GridExecutor: Generating dynamic grid levels (TP disabled - using adjacent level logic)"
+        # )
         self.step = Decimal("0")
         self.position_break_even_price = Decimal("0")
         self.position_size_base = Decimal("0")
@@ -200,36 +200,18 @@ class GridExecutor(ExecutorBase):
         return self.is_perpetual_connector(self.config.connector_name)
 
     async def validate_sufficient_balance(self):
-        mid_price = self.get_price(
-            self.config.connector_name, self.config.trading_pair, PriceType.MidPrice
-        )
-        total_amount_base = self.config.total_amount_quote / mid_price
-        if self.is_perpetual:
-            order_candidate = PerpetualOrderCandidate(
-                trading_pair=self.config.trading_pair,
-                is_maker=self.config.triple_barrier_config.open_order_type.is_limit_type(),
-                order_type=self.config.triple_barrier_config.open_order_type,
-                order_side=self.config.side,
-                amount=total_amount_base,
-                price=mid_price,
-                leverage=Decimal(1),
-            )
-        else:
-            order_candidate = OrderCandidate(
-                trading_pair=self.config.trading_pair,
-                is_maker=self.config.triple_barrier_config.open_order_type.is_limit_type(),
-                order_type=self.config.triple_barrier_config.open_order_type,
-                order_side=self.config.side,
-                amount=total_amount_base,
-                price=mid_price,
-            )
-        adjusted_order_candidates = self.adjust_order_candidates(
-            self.config.connector_name, [order_candidate]
-        )
-        if adjusted_order_candidates[0].amount == Decimal("0"):
-            self.close_type = CloseType.INSUFFICIENT_BALANCE
-            self.logger().error("Not enough budget to open position.")
-            self.stop()
+        pass
+
+    # adjusted_order_candidates = self.adjust_order_candidates(
+    #     self.config.connector_name, [order_candidate]
+    # )
+    # self.logger().info(
+    #     f"Adjust order candidates 2 {adjusted_order_candidates[0].amount} {adjusted_order_candidates[0].price} {adjusted_order_candidates[0].order_side}"
+    # )
+    # if adjusted_order_candidates[0].amount == Decimal("0"):
+    #     self.close_type = CloseType.INSUFFICIENT_BALANCE
+    #     self.logger().error("Not enough budget to open position.")
+    #     self.stop()
 
     def _generate_grid_levels(self):
         grid_levels = []
@@ -322,9 +304,6 @@ class GridExecutor(ExecutorBase):
             current_mid_price = self.get_price(
                 self.config.connector_name, self.config.trading_pair, PriceType.MidPrice
             )
-            dynamic_side = (
-                TradeType.SELL if price > current_mid_price else TradeType.BUY
-            )
 
             grid_levels.append(
                 GridLevel(
@@ -332,146 +311,26 @@ class GridExecutor(ExecutorBase):
                     price=price,
                     amount_quote=quote_amount_per_level,
                     take_profit=level_take_profit,  # Always 0 for dynamic grid
-                    side=dynamic_side,  # Use dynamic side instead of config.side
+                    side=TradeType.BUY,  # Use dynamic side instead of config.side
                     open_order_type=self.config.triple_barrier_config.open_order_type,
                     take_profit_order_type=self.config.triple_barrier_config.take_profit_order_type,
                 )
             )
+        top_most_level = grid_levels[-1]
+        top_most_level.reset_as_filled()
+        dummy = InFlightOrder(
+            client_order_id=f"DUMMY-{top_most_level.id}",
+            trading_pair=self.config.trading_pair,
+            order_type=top_most_level.open_order_type,
+            trade_type=top_most_level.side,
+            amount=self._base_amount_per_level,
+            creation_timestamp=float(self._strategy.current_timestamp),
+            price=top_most_level.price,
+            initial_state=OrderState.FILLED,
+            leverage=int(1),
+        )
+        top_most_level.active_open_order = DummyTrackedFilledOrder(order=dummy)
         # Log grid creation details
-
-        if not self.config.is_directional:
-            self.logger().info(
-                f"""GridExecutor: Dynamic Grid Created
-            ---------------
-            Total levels: {len(grid_levels)} (requested: {self.config.n_levels})
-            Price range: {self.config.start_price} - {self.config.end_price}
-            Current mid price: {current_mid_price}
-            Amount per level: {quote_amount_per_level}
-            Grid levels: {[f"{g.side.name} @{g.price} | {g.amount_quote}" for g in grid_levels]}
-            """
-            )
-            return grid_levels
-        # Build initial seed order level (simple)
-        try:
-            count_above = [
-                g for g in grid_levels[:-1] if g.price >= current_mid_price
-            ]  # LONG
-            count_below = [
-                g for g in grid_levels[1:] if g.price <= current_mid_price
-            ]  # SHORT
-
-            if self.config.side == TradeType.BUY:
-                count = len(count_above)
-                side = TradeType.BUY
-                price_seed = (
-                    min(g.price for g in grid_levels)
-                    if grid_levels
-                    else current_mid_price
-                )
-            else:
-                count = len(count_below)
-                side = TradeType.SELL
-                price_seed = (
-                    max(g.price for g in grid_levels)
-                    if grid_levels
-                    else current_mid_price
-                )
-            if count > 0 and base_amount_per_level > 0:
-                amount_base = Decimal(str(count)) * base_amount_per_level
-                amount_quote = amount_base * current_mid_price
-                # Store base amount explicitly to avoid quote/mid rounding drift later
-                self._initial_amount_base = amount_base
-                self._initial_order_level = GridLevel(
-                    id="INIT",
-                    price=price_seed,
-                    amount_quote=amount_quote,
-                    take_profit=Decimal("0"),
-                    side=side,
-                    open_order_type=self.config.triple_barrier_config.open_order_type,
-                    take_profit_order_type=self.config.triple_barrier_config.take_profit_order_type,
-                )
-                self.logger().info(
-                    f"InitOrder: created initial level side={side.name}, count={count}, amount_base={amount_base}, "
-                    f"amount_quote={amount_quote}, price={price_seed}"
-                )
-            else:
-                self.logger().info(
-                    f"InitOrder: no initial level created (count={count_above if self.config.side == TradeType.BUY else count_below}, "
-                    f"base_per_level={base_amount_per_level})"
-                )
-        except Exception as e:
-            self.logger().error(f"InitOrder: failed to build initial level: {e}")
-
-        # Mark one boundary level as initially filled (visual/logic seed)
-        self.logger().info("InitOrder: marking boundary level as filled")
-        try:
-            if len(grid_levels) > 0:
-                if self.config.side == TradeType.BUY:
-                    # LONG: pick first level >= mid (consider entire grid)
-                    eligible = [
-                        (i, g)
-                        for i, g in enumerate(grid_levels)
-                        if g.price >= current_mid_price
-                    ]
-                    if eligible:
-                        idx, level = eligible[0]
-                        # Attach a dummy filled order and mark state as filled
-                        level.reset_as_filled()
-                        dummy = InFlightOrder(
-                            client_order_id=f"DUMMY-{level.id}",
-                            trading_pair=self.config.trading_pair,
-                            order_type=level.open_order_type,
-                            trade_type=level.side,
-                            amount=self._base_amount_per_level,
-                            creation_timestamp=float(self._strategy.current_timestamp),
-                            price=level.price,
-                            initial_state=OrderState.FILLED,
-                            leverage=int(1),
-                        )
-                        level.active_open_order = DummyTrackedFilledOrder(order=dummy)
-                        self.logger().info(
-                            f"InitOrder: marked initial LONG boundary level filled at index={idx}, price={level.price}"
-                        )
-                    else:
-                        self.logger().info(
-                            "InitOrder: no eligible LONG boundary level to mark as filled"
-                        )
-                else:
-                    # SHORT: pick last level <= mid (consider entire grid)
-                    eligible = [
-                        (i, g)
-                        for i, g in enumerate(grid_levels)
-                        if g.price <= current_mid_price
-                    ]
-                    self.logger().info(f"InitOrder: eligible {eligible}")
-                    if eligible:
-                        idx, level = eligible[-1]
-                        self.logger().info(f"InitOrder: level {level}")
-                        # Attach a dummy filled order and mark state as filled
-                        level.reset_as_filled()
-                        dummy = InFlightOrder(
-                            client_order_id=f"DUMMY-{level.id}",
-                            trading_pair=self.config.trading_pair,
-                            order_type=level.open_order_type,
-                            trade_type=level.side,
-                            amount=self._base_amount_per_level,
-                            creation_timestamp=float(self._strategy.current_timestamp),
-                            price=level.price,
-                            initial_state=OrderState.FILLED,
-                            leverage=int(1),
-                        )
-                        level.active_open_order = DummyTrackedFilledOrder(order=dummy)
-                        self.logger().info(
-                            f"InitOrder: marked initial SHORT boundary level filled at index={idx}, price={level.price}"
-                        )
-                    else:
-                        self.logger().info(
-                            "InitOrder: no eligible SHORT boundary level to mark as filled"
-                        )
-        except Exception as e:
-            self.logger().error(
-                f"InitOrder: failed to mark boundary level as filled: {e}"
-            )
 
         self.logger().info(
             f"""GridExecutor: Dynamic Grid Created
@@ -480,11 +339,11 @@ class GridExecutor(ExecutorBase):
         Price range: {self.config.start_price} - {self.config.end_price}
         Current mid price: {current_mid_price}
         Amount per level: {quote_amount_per_level}
-        Grid levels: {[f"{g.side.name} @{g.price} | {g.amount_quote} : {g.state.value}" for g in grid_levels]}
-        {f"{self._initial_order_level.side.name} @{self._initial_order_level.price} | {self._initial_order_level.amount_quote}" if self._initial_order_level else "No initial level"}
+        Grid levels: {[f"\n{g.side.name} @{g.price} | {g.amount_quote} | {g.state.value}" for g in grid_levels]}
         """
         )
         return grid_levels
+        # Build initial seed order level (simple)
 
     @property
     def end_time(self) -> Optional[float]:
@@ -690,7 +549,13 @@ class GridExecutor(ExecutorBase):
         :return: None
         """
         order_candidate = self._get_open_order_candidate(level)
+        self.logger().info(
+            f"Adjust and place open order {order_candidate.amount} {order_candidate.price} {order_candidate.order_side}"
+        )
         self.adjust_order_candidates(self.config.connector_name, [order_candidate])
+        self.logger().info(
+            f"Adjust and place open order 2 {order_candidate.amount} {order_candidate.price} {order_candidate.order_side}"
+        )
         if order_candidate.amount > 0:
             # Stagger to avoid duplicate ms nonces on burst submissions
             self._stagger_nonce_sync()
@@ -735,16 +600,9 @@ class GridExecutor(ExecutorBase):
 
     def _get_open_order_candidate(self, level: GridLevel):
         entry_price = level.price
-        if self.is_perpetual:
-            return PerpetualOrderCandidate(
-                trading_pair=self.config.trading_pair,
-                is_maker=self.config.triple_barrier_config.open_order_type.is_limit_type(),
-                order_type=self.config.triple_barrier_config.open_order_type,
-                order_side=level.side,  # Use level's dynamic side
-                amount=level.amount_quote / self.mid_price,
-                price=entry_price,
-                leverage=Decimal(1),
-            )
+        self.logger().info(
+            f"Open order candidate: {level.side.name} {level.amount_quote} {entry_price}"
+        )
         return OrderCandidate(
             trading_pair=self.config.trading_pair,
             is_maker=self.config.triple_barrier_config.open_order_type.is_limit_type(),
@@ -819,7 +677,7 @@ class GridExecutor(ExecutorBase):
         )
 
         # Update grid sides based on current price for dynamic behavior
-        self._update_grid_sides_based_on_price()
+        # self._update_grid_sides_based_on_price()
         # Sliding window: shift by one distance step if breached
         self._maybe_trailing_slide()
 
@@ -880,27 +738,27 @@ class GridExecutor(ExecutorBase):
             )
 
             # Extra: print filled orders brief (price, quote amount, side, fees)
-            try:
-                if self._filled_orders:
-                    brief_lines = []
-                    for o in self._filled_orders[-20:]:  # last 20 to avoid log spam
-                        try:
-                            price_v = o.get("price")
-                            amt_q = o.get("executed_amount_quote", 0)
-                            side_v = o.get("trade_type", "?")
-                            fees_q = o.get("cumulative_fee_paid_quote", 0)
-                            brief_lines.append(
-                                f"{side_v} @ {price_v} | amt_q={amt_q} | fees={fees_q}"
-                            )
-                        except Exception:
-                            continue
-                    if brief_lines:
-                        self.logger().info(
-                            "Filled orders (price / amount_quote / side / fees):\n"
-                            + "\n".join(brief_lines)
-                        )
-            except Exception:
-                pass
+            # try:
+            #     if self._filled_orders:
+            #         brief_lines = []
+            #         for o in self._filled_orders[-20:]:  # last 20 to avoid log spam
+            #             try:
+            #                 price_v = o.get("price")
+            #                 amt_q = o.get("executed_amount_quote", 0)
+            #                 side_v = o.get("trade_type", "?")
+            #                 fees_q = o.get("cumulative_fee_paid_quote", 0)
+            #                 brief_lines.append(
+            #                     f"{side_v} @ {price_v} | amt_q={amt_q} | fees={fees_q}"
+            #                 )
+            #             except Exception:
+            #                 continue
+            #         if brief_lines:
+            #             self.logger().info(
+            #                 "Filled orders (price / amount_quote / side / fees):\n"
+            #                 + "\n".join(brief_lines)
+            #             )
+            # except Exception:
+            #     pass
 
         except Exception as e:
             self.logger().error(f"Error logging trading stats: {e}")
@@ -915,7 +773,8 @@ class GridExecutor(ExecutorBase):
 
         # Filter levels by activation bounds and dynamic logic
         levels_allowed = self._filter_levels_by_activation_bounds()
-
+        if len(levels_allowed) > 0:
+            self.logger().info(f"levels_allowed: {levels_allowed}")
         sorted_levels_by_proximity = self._sort_levels_by_proximity(levels_allowed)
         return sorted_levels_by_proximity[: self.config.max_orders_per_batch]
 
@@ -1175,7 +1034,7 @@ class GridExecutor(ExecutorBase):
             self._status = RunnableStatus.SHUTTING_DOWN
         else:
             self.logger().info("InitOrder: attempting initial market order (if needed)")
-            self._place_initial_market_order_if_needed()
+            # self._place_initial_market_order_if_needed()
             # tiny stagger to avoid duplicate nonce on connectors using ms nonce
             await self._sleep(0.01)
 
@@ -1362,84 +1221,87 @@ class GridExecutor(ExecutorBase):
         Handles all states: NOT_ACTIVE, OPEN_ORDER_FILLED (needs remake), etc.
         """
         current_price = self.mid_price
-
-        # Check level above (i+1) for SELL order
-        if filled_index + 1 < len(self.grid_levels):
-            upper_level = self.grid_levels[filled_index + 1]
-            self.logger().debug(
-                f"AutoFillDeb: Upper level {filled_index + 1} ({upper_level.id}): "
-                f"price={upper_level.price}, state={upper_level.state}, "
-                f"side={upper_level.side}, has_order={upper_level.active_open_order is not None}"
-            )
-
-            # Case 1: Level is completely vacant (NOT_ACTIVE)
-            if (
-                upper_level.price > current_price
-                and upper_level.state == GridLevelStates.NOT_ACTIVE
-            ):
-                upper_level.side = TradeType.SELL
-                self.logger().info(
-                    f"AutoFillDeb: Placing SELL order on vacant upper level {upper_level.id}"
-                )
-                self._place_dynamic_order(upper_level)
-
-            # Case 2: Level has filled open order (OPEN_ORDER_FILLED) - reset and remake
-            elif (
-                upper_level.state == GridLevelStates.OPEN_ORDER_FILLED
-                and upper_level.price > current_price
-            ):
-                # For dynamic grid: reset filled levels since we don't use TP
-                self.logger().info(
-                    f"AutoFillDeb: Resetting filled upper level {upper_level.id} to place new SELL order"
-                )
-                upper_level.reset_level()  # Reset to NOT_ACTIVE
-                upper_level.side = TradeType.SELL
-                self._place_dynamic_order(upper_level)
-            else:
+        for i in range(1, len(self.grid_levels) + 1):
+            # Check level above (i+1) for SELL order
+            if filled_index + i < len(self.grid_levels):
+                upper_level = self.grid_levels[filled_index + i]
                 self.logger().debug(
-                    f"AutoFillDeb: Upper level {upper_level.id} not eligible: "
-                    f"price_check={upper_level.price > current_price}, "
-                    f"state_check={upper_level.state == GridLevelStates.OPEN_ORDER_FILLED}"
+                    f"AutoFillDeb: Upper level {filled_index + i} ({upper_level.id}): "
+                    f"price={upper_level.price}, state={upper_level.state}, "
+                    f"side={upper_level.side}, has_order={upper_level.active_open_order is not None}"
                 )
 
-        # Check level below (i-1) for BUY order
-        if filled_index - 1 >= 0:
-            lower_level = self.grid_levels[filled_index - 1]
-            self.logger().debug(
-                f"AutoFillDeb: Lower level {filled_index - 1} ({lower_level.id}): "
-                f"price={lower_level.price}, state={lower_level.state}, "
-                f"side={lower_level.side}, has_order={lower_level.active_open_order is not None}"
-            )
+                # Case 1: Level is completely vacant (NOT_ACTIVE)
+                if (
+                    upper_level.price > current_price
+                    and upper_level.state == GridLevelStates.NOT_ACTIVE
+                ):
+                    upper_level.side = TradeType.SELL
+                    self.logger().info(
+                        f"AutoFillDeb: Placing SELL order on vacant upper level {upper_level.id}"
+                    )
+                    self._place_dynamic_order(upper_level)
+                    break
 
-            # Case 1: Level is completely vacant (NOT_ACTIVE)
-            if (
-                lower_level.price <= current_price
-                and lower_level.state == GridLevelStates.NOT_ACTIVE
-            ):
-                lower_level.side = TradeType.BUY
-                self.logger().info(
-                    f"AutoFillDeb: Placing BUY order on vacant lower level {lower_level.id}"
-                )
-                self._place_dynamic_order(lower_level)
+                # Case 2: Level has filled open order (OPEN_ORDER_FILLED) - reset and remake
+                elif (
+                    upper_level.state == GridLevelStates.OPEN_ORDER_FILLED
+                    and upper_level.price > current_price
+                ):
+                    # For dynamic grid: reset filled levels since we don't use TP
+                    self.logger().info(
+                        f"AutoFillDeb: Resetting filled upper level {upper_level.id} to place new SELL order"
+                    )
+                    upper_level.reset_level()  # Reset to NOT_ACTIVE
+                    upper_level.side = TradeType.SELL
+                    self._place_dynamic_order(upper_level)
+                    break
+                else:
+                    self.logger().debug(
+                        f"AutoFillDeb: Upper level {upper_level.id} not eligible: "
+                        f"price_check={upper_level.price > current_price}, "
+                        f"state_check={upper_level.state == GridLevelStates.OPEN_ORDER_FILLED}"
+                    )
 
-            # Case 2: Level has filled open order (OPEN_ORDER_FILLED) - reset and remake
-            elif (
-                lower_level.state == GridLevelStates.OPEN_ORDER_FILLED
-                and lower_level.price <= current_price
-            ):
-                # For dynamic grid: reset filled levels since we don't use TP
-                self.logger().info(
-                    f"AutoFillDeb: Resetting filled lower level {lower_level.id} to place new BUY order"
-                )
-                lower_level.reset_level()  # Reset to NOT_ACTIVE
-                lower_level.side = TradeType.BUY
-                self._place_dynamic_order(lower_level)
-            else:
+            # Check level below (i-1) for BUY order
+            if filled_index - i >= 0:
+                lower_level = self.grid_levels[filled_index - i]
                 self.logger().debug(
-                    f"AutoFillDeb: Lower level {lower_level.id} not eligible: "
-                    f"price_check={lower_level.price <= current_price}, "
-                    f"state_check={lower_level.state == GridLevelStates.OPEN_ORDER_FILLED}"
+                    f"AutoFillDeb: Lower level {filled_index - i} ({lower_level.id}): "
+                    f"price={lower_level.price}, state={lower_level.state}, "
+                    f"side={lower_level.side}, has_order={lower_level.active_open_order is not None}"
                 )
+
+                # Case 1: Level is completely vacant (NOT_ACTIVE)
+                if (
+                    lower_level.price <= current_price
+                    and lower_level.state == GridLevelStates.NOT_ACTIVE
+                ):
+                    lower_level.side = TradeType.BUY
+                    self.logger().info(
+                        f"AutoFillDeb: Placing BUY order on vacant lower level {lower_level.id}"
+                    )
+                    self._place_dynamic_order(lower_level)
+                    break
+                # Case 2: Level has filled open order (OPEN_ORDER_FILLED) - reset and remake
+                elif (
+                    lower_level.state == GridLevelStates.OPEN_ORDER_FILLED
+                    and lower_level.price <= current_price
+                ):
+                    # For dynamic grid: reset filled levels since we don't use TP
+                    self.logger().info(
+                        f"AutoFillDeb: Resetting filled lower level {lower_level.id} to place new BUY order"
+                    )
+                    lower_level.reset_level()  # Reset to NOT_ACTIVE
+                    lower_level.side = TradeType.BUY
+                    self._place_dynamic_order(lower_level)
+                    break
+                else:
+                    self.logger().debug(
+                        f"AutoFillDeb: Lower level {lower_level.id} not eligible: "
+                        f"price_check={lower_level.price <= current_price}, "
+                        f"state_check={lower_level.state == GridLevelStates.OPEN_ORDER_FILLED}"
+                    )
 
     def _place_dynamic_order(self, level: GridLevel):
         """
@@ -2211,67 +2073,69 @@ class GridExecutor(ExecutorBase):
         """
         await asyncio.sleep(delay)
 
-    def _place_initial_market_order_if_needed(self):
-        try:
-            self.logger().info("InitOrder: making initial order")
+    # def _place_initial_market_order_if_needed(self):
+    #     try:
+    #         self.logger().info(
+    #             f"InitOrder: making initial order {self._initial_order_level.side.name} {self._initial_order_level.amount_quote}"
+    #         )
 
-            if self._initial_order_placed or self._initial_order_level is None:
-                return
-            if not self.is_perpetual:
-                self.logger().info("InitOrder: skipping (not a perpetual connector)")
-                return
-            # Use precomputed base amount to avoid drift from quote/mid changes
-            amount_base = self._initial_amount_base
-            if amount_base <= Decimal("0"):
-                self.logger().info(
-                    f"InitOrder: computed amount_base={amount_base}, skipping"
-                )
-                return
-            # build MARKET candidate
-            if self.is_perpetual:
-                order_candidate = PerpetualOrderCandidate(
-                    trading_pair=self.config.trading_pair,
-                    is_maker=False,
-                    order_type=OrderType.MARKET,
-                    order_side=self._initial_order_level.side,
-                    amount=amount_base,
-                    price=self._initial_order_level.price,
-                    leverage=Decimal(1),
-                )
-            else:
-                order_candidate = OrderCandidate(
-                    trading_pair=self.config.trading_pair,
-                    is_maker=False,
-                    order_type=OrderType.MARKET,
-                    order_side=self._initial_order_level.side,
-                    amount=amount_base,
-                    price=self._initial_order_level.price,
-                )
-            self.adjust_order_candidates(self.config.connector_name, [order_candidate])
-            if order_candidate.amount > 0:
-                self.logger().info(
-                    f"InitOrder: placing MARKET {order_candidate.order_side.name}, amount={order_candidate.amount} (base)"
-                )
-                # Stagger to avoid duplicate ms nonces on burst submissions
-                self._stagger_nonce_sync()
-                order_id = self.place_order(
-                    connector_name=self.config.connector_name,
-                    trading_pair=self.config.trading_pair,
-                    order_type=OrderType.MARKET,
-                    amount=order_candidate.amount,
-                    price=Decimal("NaN"),
-                    side=order_candidate.order_side,
-                    position_action=PositionAction.OPEN,
-                )
-                self._initial_order_level.active_open_order = TrackedOrder(
-                    order_id=order_id
-                )
-                self._initial_order_placed = True
-                self.max_open_creation_timestamp = self._strategy.current_timestamp
-            else:
-                self.logger().info("InitOrder: adjusted amount is 0, skipping")
-        except Exception as e:
-            self.logger().error(f"InitOrder: failed to place market order: {e}")
+    #         if self._initial_order_placed or self._initial_order_level is None:
+    #             return
+    #         if not self.is_perpetual:
+    #             self.logger().info("InitOrder: skipping (not a perpetual connector)")
+    #             return
+    #         # Use precomputed base amount to avoid drift from quote/mid changes
+    #         amount_base = self._initial_amount_base
+    #         if amount_base <= Decimal("0"):
+    #             self.logger().info(
+    #                 f"InitOrder: computed amount_base={amount_base}, skipping"
+    #             )
+    #             return
+    #         # build MARKET candidate
+    #         if self.is_perpetual:
+    #             order_candidate = PerpetualOrderCandidate(
+    #                 trading_pair=self.config.trading_pair,
+    #                 is_maker=False,
+    #                 order_type=OrderType.MARKET,
+    #                 order_side=self._initial_order_level.side,
+    #                 amount=amount_base,
+    #                 price=self._initial_order_level.price,
+    #                 leverage=Decimal(1),
+    #             )
+    #         else:
+    #             order_candidate = OrderCandidate(
+    #                 trading_pair=self.config.trading_pair,
+    #                 is_maker=False,
+    #                 order_type=OrderType.MARKET,
+    #                 order_side=self._initial_order_level.side,
+    #                 amount=amount_base,
+    #                 price=self._initial_order_level.price,
+    #             )
+    #         self.adjust_order_candidates(self.config.connector_name, [order_candidate])
+    #         if order_candidate.amount > 0:
+    #             self.logger().info(
+    #                 f"InitOrder: placing MARKET {order_candidate.order_side.name}, amount={order_candidate.amount} (base)"
+    #             )
+    #             # Stagger to avoid duplicate ms nonces on burst submissions
+    #             self._stagger_nonce_sync()
+    #             order_id = self.place_order(
+    #                 connector_name=self.config.connector_name,
+    #                 trading_pair=self.config.trading_pair,
+    #                 order_type=OrderType.MARKET,
+    #                 amount=order_candidate.amount,
+    #                 price=Decimal("NaN"),
+    #                 side=order_candidate.order_side,
+    #                 position_action=PositionAction.OPEN,
+    #             )
+    #             self._initial_order_level.active_open_order = TrackedOrder(
+    #                 order_id=order_id
+    #             )
+    #             self._initial_order_placed = True
+    #             self.max_open_creation_timestamp = self._strategy.current_timestamp
+    #         else:
+    #             self.logger().info("InitOrder: adjusted amount is 0, skipping")
+    #     except Exception as e:
+    #         self.logger().error(f"InitOrder: failed to place market order: {e}")
 
     def _stagger_nonce_sync(self):
         """Ensure consecutive submissions occur in different milliseconds without touching connectors."""

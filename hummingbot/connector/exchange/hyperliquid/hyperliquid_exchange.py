@@ -208,8 +208,10 @@ class HyperliquidExchange(ExchangePyBase):
         )
         trading_rules_list = await self._format_trading_rules(exchange_info)
         self._trading_rules.clear()
+
         for trading_rule in trading_rules_list:
             self._trading_rules[trading_rule.trading_pair] = trading_rule
+
         self._initialize_trading_pair_symbols_from_exchange_info(
             exchange_info=exchange_info
         )
@@ -735,6 +737,7 @@ class HyperliquidExchange(ExchangePyBase):
                 )
             else:
                 mapping[ex_name] = trading_pair
+            # self.logger().info(f"Trading pair: {trading_pair}")
         self._set_trading_pair_symbol_map(mapping)
 
     def _resolve_trading_pair_symbols_duplicate(
