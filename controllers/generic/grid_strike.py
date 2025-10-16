@@ -133,8 +133,8 @@ class GridStrike(ControllerBase):
             self.config.connector_name, self.config.trading_pair, PriceType.MidPrice
         )
         if self.config.start_price == Decimal("0"):
-            self.config.start_price = mid_price - Decimal("20")
-            self.config.end_price = mid_price + Decimal("200")
+            self.config.start_price = mid_price - Decimal("100")
+            self.config.end_price = mid_price + Decimal("100")
             self.config.trailing_up_limit = mid_price + Decimal("1050")
             self.config.trailing_down_limit = mid_price - Decimal("1050")
         # Use configured price boundaries directly
