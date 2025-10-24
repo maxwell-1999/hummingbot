@@ -1513,10 +1513,10 @@ class NeutralGridExecutor(ExecutorBase):
         # Directional trailing enablement based on config limits
         trailing_up_limit_cfg = getattr(self.config, "trailing_up_limit", None)
         trailing_down_limit_cfg = getattr(self.config, "trailing_down_limit", None)
-        allow_up = trailing_up_limit_cfg is None or Decimal(
+        allow_up = trailing_up_limit_cfg is not None and Decimal(
             str(trailing_up_limit_cfg)
         ) != Decimal("0")
-        allow_down = trailing_down_limit_cfg is None or Decimal(
+        allow_down = trailing_down_limit_cfg is not None and Decimal(
             str(trailing_down_limit_cfg)
         ) != Decimal("0")
 
