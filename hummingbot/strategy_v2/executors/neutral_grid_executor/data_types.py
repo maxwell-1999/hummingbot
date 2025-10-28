@@ -58,6 +58,7 @@ class GridLevelStates(Enum):
     OPEN_ORDER_FILLED = "OPEN_ORDER_FILLED"
     CLOSE_ORDER_PLACED = "CLOSE_ORDER_PLACED"
     COMPLETE = "COMPLETE"
+    IDLE = "IDLE"
 
 
 class GridLevel(BaseModel):
@@ -74,6 +75,8 @@ class GridLevel(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def update_state(self, logger=None):
+        if self.state == GridLevelStates.IDLE:
+            return
         if logger:
             logger().info(
                 f"TrailingDeb: levelDeb {self.active_open_order.order_id if self.active_open_order else None} {self.state} {self.active_open_order.is_filled if self.active_open_order else None}="
