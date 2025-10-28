@@ -134,10 +134,8 @@ class NeutralGridStrike(ControllerBase):
             self.config.connector_name, self.config.trading_pair, PriceType.MidPrice
         )
         if self.config.start_price == Decimal("0"):
-            self.config.start_price = mid_price - Decimal("20")
-            self.config.end_price = mid_price + Decimal("200")
-            self.config.trailing_up_limit = mid_price + Decimal("1050")
-            self.config.trailing_down_limit = mid_price - Decimal("1050")
+            self.config.start_price = mid_price - Decimal("500")
+            self.config.end_price = mid_price + Decimal("500")
         # Use configured price boundaries directly
         start_price = self.config.start_price
         end_price = self.config.end_price
