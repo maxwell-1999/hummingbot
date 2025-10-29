@@ -364,19 +364,31 @@ class NeutralGridExecutor(ExecutorBase):
             for level in grid_levels:
                 level.side = TradeType.SELL
             grid_levels[0].state = GridLevelStates.IDLE
+        # To make buys last as idle, or sells first as idle, whichever one is closer.
+
         else:
             # for neutral first levles till CP-1 are long, CP is idle, and from CP+1 to end_price are short
-            cp_index = 0
+            first_sell_index = 0
             for i, level in enumerate(grid_levels):
                 if level.price < current_mid_price:
                     level.side = TradeType.BUY
-                    cp_index = i + 1
+                    first_sell_index = i + 1
                 else:
-                    break
-            for i in range(cp_index + 1, len(grid_levels)):
-                grid_levels[i].side = TradeType.SELL
-            self.logger().info(f"GenerateGridLevels: cp_index {cp_index}")
-            grid_levels[cp_index].state = GridLevelStates.IDLE
+                    level.side = TradeType.SELL
+            last_buy_index = first_sell_index - 1
+            self.logger().info(
+                f"GenerateGridLevels: first_sell_index {first_sell_index}"
+            )
+            self.logger().info(f"GenerateGridLevels: last_buy_index {last_buy_index}")
+            # grid_levels[first_sell_index].state = GridLevelStates.IDLE
+            last_buy_price_diff = grid_levels[last_buy_index].price - current_mid_price
+            first_sell_price_diff = (
+                current_mid_price - grid_levels[first_sell_index].price
+            )
+            idle_index = first_sell_index
+            if last_buy_price_diff < first_sell_price_diff:
+                idle_index = last_buy_index
+            grid_levels[idle_index].state = GridLevelStates.IDLE
         return grid_levels
 
     @property
