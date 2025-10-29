@@ -381,9 +381,12 @@ class NeutralGridExecutor(ExecutorBase):
             )
             self.logger().info(f"GenerateGridLevels: last_buy_index {last_buy_index}")
             # grid_levels[first_sell_index].state = GridLevelStates.IDLE
-            last_buy_price_diff = grid_levels[last_buy_index].price - current_mid_price
+            last_buy_price_diff = current_mid_price - grid_levels[last_buy_index].price
             first_sell_price_diff = (
-                current_mid_price - grid_levels[first_sell_index].price
+                grid_levels[first_sell_index].price - current_mid_price
+            )
+            self.logger().info(
+                f"GenerateGridLevels: last_buy_price_diff {last_buy_price_diff} first_sell_price_diff {first_sell_price_diff}"
             )
             idle_index = first_sell_index
             if last_buy_price_diff < first_sell_price_diff:
