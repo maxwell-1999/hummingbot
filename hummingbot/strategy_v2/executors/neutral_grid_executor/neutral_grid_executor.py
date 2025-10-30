@@ -56,36 +56,27 @@ from hummingbot.strategy_v2.utils.distributions import Distributions
 
 class MDD:
     investment: Decimal = Decimal("0")
-    best_pnl: Decimal = Decimal("0")
+    worst_pnl: Decimal = Decimal("0")
     mdd: Decimal = Decimal("0")
     cdd: Decimal = Decimal("0")
 
     def __init__(self, investment: Decimal):
         self.investment = investment
-        self.best_pnl = Decimal("0")
+        self.worst_pnl = Decimal("0")
         self.mdd = Decimal("0")
         self.cdd = Decimal("0")
 
     def update(self, pnl: Decimal, logger: HummingbotLogger):
-        if pnl > self.best_pnl:
-            self.best_pnl = pnl
-            self.cdd = Decimal("0")
-        elif pnl + self.investment <= 0:
-            self.mdd = Decimal("100")
-        else:
-            curr_value = self.investment + pnl
-            best_value = self.investment + self.best_pnl
-            self.cdd = (best_value - curr_value) / best_value
-            if self.mdd == Decimal("0"):
-                self.mdd = self.cdd
-            else:
-                self.mdd = max(self.mdd, self.cdd)
+        if pnl < self.worst_pnl:
+            self.worst_pnl = pnl
+        self.cdd = abs(pnl / self.investment)
+        self.mdd = abs(self.worst_pnl / self.investment)
         return self.cdd
 
     def to_json(self):
         return {
             "investment": self.investment,
-            "best_pnl": self.best_pnl,
+            "worst_pnl": self.worst_pnl,
             "mdd": (self.mdd * 100).quantize(Decimal("0.01")),
             "cdd": (self.cdd * 100).quantize(Decimal("0.01")),
         }
@@ -146,6 +137,14 @@ class NeutralGridExecutor(ExecutorBase):
         )
         self.trading_rules = self.get_trading_rules(
             self.config.connector_name, self.config.trading_pair
+        )
+        # Debug: Log trading rules to verify exchange min sizes and increments
+        self.logger().info(
+            f"TradingRules: pair={self.config.trading_pair} is_perp={self.is_perpetual} "
+            f"min_notional={self.trading_rules.min_notional_size} "
+            f"min_order_size={self.trading_rules.min_order_size} "
+            f"min_base_inc={self.trading_rules.min_base_amount_increment} "
+            f"min_price_inc={self.trading_rules.min_price_increment}"
         )
         # Initialize spacing before grid generation; will be set in _generate_grid_levels
         self.grid_placing_difference: Decimal = Decimal("0")
@@ -513,10 +512,6 @@ class NeutralGridExecutor(ExecutorBase):
                 level.active_open_order.order.completely_filled_event.is_set()
                 and level.active_close_order.order.completely_filled_event.is_set()
             ):
-                open_order = level.active_open_order.order.to_json()
-                close_order = level.active_close_order.order.to_json()
-                self._filled_orders.append(open_order)
-                self._filled_orders.append(close_order)
                 self.levels_by_state[GridLevelStates.COMPLETE].remove(level)
                 level.reset_level()
                 self.levels_by_state[GridLevelStates.NOT_ACTIVE].append(level)
@@ -720,7 +715,7 @@ class NeutralGridExecutor(ExecutorBase):
 
         # Log stats periodically (every 5 seconds)
         if hasattr(self, "_last_stats_log_time"):
-            if self._strategy.current_timestamp - self._last_stats_log_time >= 5:
+            if self._strategy.current_timestamp - self._last_stats_log_time >= 20:
                 self._log_trading_stats()
                 self._last_stats_log_time = self._strategy.current_timestamp
         else:
@@ -756,44 +751,17 @@ class NeutralGridExecutor(ExecutorBase):
             # Debug: Show the calculation breakdown
 
             self.logger().info(
-                f"\n📊 TRADING STATS - {self.config.id}\n"
-                f"├─ 💰 Volume Traded: {volume_traded:.4f} {self.config.trading_pair.split('-')[1]}\n"
-                f"├─ 📈 Net PnL: {net_pnl:.4f} ({net_pnl_pct:.2f}%)\n"
-                f"├─ 💵 Realized PnL: {realized_pnl:.4f}\n"
-                f"├─ 📊 Unrealized PnL: {unrealized_pnl:.4f}\n"
-                f"├─ 💸 Total Fees: {cum_fees:.4f}\n"
-                f"├─ 🎯 Position Size: {position_size:.4f}\n"
-                f"├─ 🏆 Break-Even Price: {break_even:.4f}\n"
+                f"├─ 💰 Volume Traded: Buy{self.realized_buy_size_quote:.4f} Sell{self.realized_sell_size_quote:.4f} {self.config.trading_pair.split('-')[1]}\n"
+                f"├─ 📈 Net PnL: {self.realized_pnl_quote:.4f} ({net_pnl_pct:.2f}%)\n"
+                f"├─ 💵 Realized PnL: {self.realized_pnl_quote:.4f}\n"
+                f"├─ 📊 Unrealized PnL: {self.realized_pnl_quote:.4f}\n"
+                f"├─ 💸 Total Fees: {self.realized_fees_quote:.4f}\n"
+                f"├─ 🎯 Position Size: {self.position_size_quote:.4f}\n"
                 f"├─ 📋 Filled Orders: {filled_orders_count}\n"
-                f"├─ 🔄 Active Orders: {active_orders}/{total_levels}\n"
                 f"├─ 💹 Mid Price: {float(self.mid_price):.4f}\n"
-                f"└─ ⚡ Buy Vol: {float(self.realized_buy_size_quote):.4f} | Sell Vol: {float(self.realized_sell_size_quote):.4f}\n"
                 f"├─ 💧 MDD: {self._mdd.to_json()['mdd']}%\n"
                 f"├─ 💧 CDD: {self._mdd.to_json()['cdd']}%\n"
             )
-
-            # Extra: print filled orders brief (price, quote amount, side, fees)
-            try:
-                if self._filled_orders:
-                    brief_lines = []
-                    for o in self._filled_orders[-20:]:  # last 20 to avoid log spam
-                        try:
-                            price_v = o.get("price")
-                            amt_q = o.get("executed_amount_quote", 0)
-                            side_v = o.get("trade_type", "?")
-                            fees_q = o.get("cumulative_fee_paid_quote", 0)
-                            brief_lines.append(
-                                f"{side_v} @ {price_v} | amt_q={amt_q} | fees={fees_q}"
-                            )
-                        except Exception:
-                            continue
-                    if brief_lines:
-                        self.logger().info(
-                            "Filled orders (price / amount_quote / side / fees):\n"
-                            + "\n".join(brief_lines)
-                        )
-            except Exception:
-                pass
 
         except Exception as e:
             self.logger().error(f"Error logging trading stats: {e}")
@@ -1247,22 +1215,6 @@ class NeutralGridExecutor(ExecutorBase):
             if order_json not in self._filled_orders:
                 self._filled_orders.append(order_json)
 
-        # Check initial order level as well
-        if (
-            self._initial_order_level
-            and self._initial_order_level.active_open_order
-            and self._initial_order_level.active_open_order.order_id == order_id
-            and self._initial_order_level.active_open_order.order
-            and self._initial_order_level.active_open_order.is_filled
-        ):
-            order_json = self._initial_order_level.active_open_order.order.to_json()
-            if order_json not in self._filled_orders:
-                self._filled_orders.append(order_json)
-                self.logger().info(
-                    f"InitOrder: added initial filled order {order_id} to PNL tracking"
-                )
-        self._log_trading_stats()
-
     def _maybe_trailing_slide(self):
         """
         Modified grid trailing: Add new grid levels and remove opposite edge levels.
@@ -1508,11 +1460,9 @@ class NeutralGridExecutor(ExecutorBase):
         3. Unrealized PnL = remaining position marked to current market price
         4. All volume tracking and metrics work as expected
         """
-
         if len(self._filled_orders) == 0:
             self._reset_all_metrics()
             return
-
         # DEBUG: Log available keys for troubleshooting
 
         try:
@@ -1802,6 +1752,7 @@ class NeutralGridExecutor(ExecutorBase):
             # === FINAL SUMMARY ===
 
         except Exception as e:
+            self.logger().error(f"Error updating all PnL metrics: {e}")
             self._reset_all_metrics()
 
     def _reset_all_metrics(self):
@@ -1829,11 +1780,9 @@ class NeutralGridExecutor(ExecutorBase):
     # Keep the old methods as thin wrappers for backward compatibility
     def update_position_metrics(self):
         """Backward compatibility wrapper - now just calls the combined function."""
-        self.update_all_pnl_metrics()
 
     def update_realized_pnl_metrics(self):
         """Backward compatibility wrapper - now just calls the combined function."""
-        self.update_all_pnl_metrics()
 
     def _reset_metrics(self):
         """Helper method to reset all PnL metrics - calls comprehensive reset"""
