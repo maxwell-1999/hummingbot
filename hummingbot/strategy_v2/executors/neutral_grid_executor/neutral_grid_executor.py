@@ -551,20 +551,16 @@ class NeutralGridExecutor(ExecutorBase):
                         GridLevelStates.OPEN_ORDER_FILLED
                     ]:
                         if level.active_open_order and level.active_open_order.order:
-                            self._filled_orders.append(
-                                level.active_open_order.order.to_json()
-                            )
+                            self._filled_orders.append(level.active_open_order.order)
                         level.reset_level()
                     for level in self.levels_by_state[
                         GridLevelStates.CLOSE_ORDER_PLACED
                     ]:
                         if level.active_close_order and level.active_close_order.order:
-                            self._filled_orders.append(
-                                level.active_close_order.order.to_json()
-                            )
+                            self._filled_orders.append(level.active_close_order.order)
                         level.reset_level()
                     if self._close_order and self._close_order.order:
-                        self._filled_orders.append(self._close_order.order.to_json())
+                        self._filled_orders.append(self._close_order.order)
                         self._close_order = None
                     self.update_realized_pnl_metrics()
                     self.levels_by_state = {}
@@ -672,7 +668,24 @@ class NeutralGridExecutor(ExecutorBase):
         take_profit_price = self.get_take_profit_price(level)
         # Determine close order side - opposite of the level's side
         close_side = TradeType.SELL if level.side == TradeType.BUY else TradeType.BUY
+
+        # For spot trading, fees are typically deducted from base asset when buying
+        # So we need to account for fees when calculating close order amount
         amount = level.active_open_order.executed_amount_base
+        if not self.is_perpetual and level.active_open_order:
+            base_asset = self.config.trading_pair.split("-")[0]
+            # If fees are paid in base asset, deduct them from the amount available for closing
+            # This ensures the close order amount matches what's actually available after fees
+            if level.active_open_order.fee_asset == base_asset and (
+                self.config.deduct_base_fees or not self.is_perpetual
+            ):
+                amount = (
+                    level.active_open_order.executed_amount_base
+                    - level.active_open_order.cum_fees_base
+                )
+                # Ensure amount doesn't go negative
+                amount = max(amount, Decimal("0"))
+
         if self.is_perpetual:
             return PerpetualOrderCandidate(
                 trading_pair=self.config.trading_pair,
@@ -1184,12 +1197,9 @@ class NeutralGridExecutor(ExecutorBase):
                 and level.active_open_order.order
                 and level.active_open_order.is_filled
             ):
-                order_json = level.active_open_order.order.to_json()
-                if order_json not in self._filled_orders:
-                    self._filled_orders.append(order_json)
-                    self.logger().debug(
-                        f"Added completed order {order_id} to PNL tracking"
-                    )
+                if level.active_open_order.order not in self._filled_orders:
+                    self._filled_orders.append(level.active_open_order.order)
+
                 return
 
             # Check close orders
@@ -1199,9 +1209,8 @@ class NeutralGridExecutor(ExecutorBase):
                 and level.active_close_order.order
                 and level.active_close_order.is_filled
             ):
-                order_json = level.active_close_order.order.to_json()
-                if order_json not in self._filled_orders:
-                    self._filled_orders.append(order_json)
+                if level.active_close_order.order not in self._filled_orders:
+                    self._filled_orders.append(level.active_close_order.order)
                 return
 
         # Check main close order
@@ -1484,7 +1493,10 @@ class NeutralGridExecutor(ExecutorBase):
                     )
                 )
 
-            sorted_orders = sorted(self._filled_orders, key=get_fill_timestamp)
+            filled_jsons = [order.to_json() for order in self._filled_orders]
+
+            sorted_orders = sorted(filled_jsons, key=get_fill_timestamp)
+            # self.logger().info(f"PNLDeb: Order: {sorted_orders}")
 
             # Debug: Log order sequence with timestamps
 
@@ -1508,6 +1520,7 @@ class NeutralGridExecutor(ExecutorBase):
             for i, order in enumerate(sorted_orders):
                 try:
                     # Extract order data safely
+                    # self.logger().info(f"PNLDeb: Order: {order}")
                     trade_type = order["trade_type"]
                     executed_base = Decimal(str(order["executed_amount_base"]))
                     executed_quote = Decimal(str(order["executed_amount_quote"]))
@@ -1587,7 +1600,9 @@ class NeutralGridExecutor(ExecutorBase):
                             # Add to existing/new long normally
                             position_cost_total = position_cost_total + executed_quote
                             position_fees_total += order_fees
-
+                        # self.logger().info(
+                        #     f"PNLDeb: Position cost total: {position_cost_total} position fees total: {position_fees_total}"
+                        # )
                         # Finalize position size and average
                         position_size_base = new_position_size
                         if position_size_base > 0:
